@@ -1667,12 +1667,22 @@ QWidget* TeamSyncGui::buildTutorialPage() {
     creditsTitle->setObjectName("sectionTitle");
     creditsLayout->addWidget(creditsTitle);
     auto* creditsText = new QLabel(
-        "<b>Developers</b><br>Sudhan Bhattarai<br>Severoos Nepali<br><br>"
+        "<b>Developers</b><br><br>"
+        "<b>Sudhan Bhattarai</b><br>"
+        "<a href=\"https://www.sudhanb.com.np\">Portfolio &#8599;</a>"
+        "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
+        "<a href=\"https://github.com/SudhanTheDev\">GitHub &#8599;</a><br><br>"
+        "<b>Severoos Nepali</b><br>"
+        "<a href=\"https://www.severoos-nepali.com.np/\">Portfolio &#8599;</a>"
+        "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
+        "<a href=\"https://github.com/Severoos-ui\">GitHub &#8599;</a><br><br>"
         "<b>Project Support</b><br>Senior Sudip Khanal<br><br>"
         "<b>Academic Guidance</b><br>Ojan Adhikari<br><br>"
         "Second Semester · Object-Oriented Programming · C++17 and Qt");
     creditsText->setWordWrap(true);
-    creditsText->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    creditsText->setTextFormat(Qt::RichText);
+    creditsText->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    creditsText->setOpenExternalLinks(true);
     creditsText->setObjectName("materialInset");
     creditsLayout->addWidget(creditsText);
     creditsLayout->addStretch();
@@ -1917,10 +1927,21 @@ void TeamSyncGui::showTutorialAndCreditsDialog() {
     security->setObjectName("materialInset");
     layout->addWidget(security);
     auto* credits = new QLabel(
-        "<b>Developers</b><br>Sudhan Bhattarai · Severoos Nepali<br><br>"
+        "<b>Developers</b><br><br>"
+        "<b>Sudhan Bhattarai</b><br>"
+        "<a href=\"https://www.sudhanb.com.np\">Portfolio &#8599;</a>"
+        "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
+        "<a href=\"https://github.com/SudhanTheDev\">GitHub &#8599;</a><br><br>"
+        "<b>Severoos Nepali</b><br>"
+        "<a href=\"https://www.severoos-nepali.com.np/\">Portfolio &#8599;</a>"
+        "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
+        "<a href=\"https://github.com/Severoos-ui\">GitHub &#8599;</a><br><br>"
         "<b>Project Support</b><br>Senior Sudip Khanal<br><br>"
         "<b>Academic Guidance</b><br>Ojan Adhikari");
     credits->setWordWrap(true);
+    credits->setTextFormat(Qt::RichText);
+    credits->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    credits->setOpenExternalLinks(true);
     credits->setObjectName("materialInset");
     layout->addWidget(credits);
     layout->addStretch();
