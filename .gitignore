@@ -1,0 +1,16 @@
+/build/
+/build-verify/
+/.toolchain/
+/data/*.dat
+/data/*.tmp
+/data/*.bak
+/reports/*.txt
+/task_attachments/
+/shared_files_storage/
+/network_cache/
+*.o
+*.obj
+*.exe
+/task_attachments/
+/shared_files_storage/
+/network_cache/
