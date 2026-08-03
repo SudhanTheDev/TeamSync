@@ -1,0 +1,60 @@
+TeamSync Limited Use License
+Version 1.0
+
+Copyright (c) 2026 Sudhan Bhattarai. All rights reserved.
+
+1. Limited permission
+
+Subject to this License, the copyright holder grants you a limited,
+non-exclusive, non-transferable, and non-sublicensable right to download or
+clone the TeamSync source code, compile it without altering the source code,
+and run the resulting unmodified software solely for personal or educational,
+non-commercial use.
+
+2. Restrictions
+
+Unless you first receive express written permission from the copyright holder,
+you may not:
+
+a. modify, adapt, translate, or alter any part of TeamSync;
+b. create or distribute derivative works based on TeamSync;
+c. redistribute, publish, mirror, upload, sublicense, sell, rent, or otherwise
+   provide TeamSync or any copy of it to another person or entity;
+d. use TeamSync, its source code, or any part of it for commercial purposes;
+e. remove, hide, or alter any copyright, attribution, or license notice; or
+f. claim TeamSync or any part of it as your own work.
+
+3. Ownership
+
+TeamSync is licensed, not sold. The copyright holder retains all right, title,
+and interest in TeamSync that is not expressly granted by this License.
+Making the source code publicly viewable does not grant any additional rights.
+
+4. Third-party components
+
+This License applies only to the original TeamSync material owned by the
+copyright holder. Any third-party libraries, tools, or components used with
+TeamSync remain subject to their respective licenses.
+
+5. Termination
+
+Your rights under this License terminate automatically if you violate any of
+its terms. Upon termination, you must stop using TeamSync and delete all copies
+in your possession or control.
+
+6. Disclaimer of warranty
+
+TEAMSYNC IS PROVIDED "AS IS" AND "AS AVAILABLE," WITHOUT WARRANTIES OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
+
+7. Limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER WILL NOT BE LIABLE
+FOR ANY CLAIM, LOSS, DAMAGE, OR OTHER LIABILITY ARISING FROM OR RELATED TO
+TEAMSYNC OR ITS USE.
+
+8. Additional permission
+
+For permission beyond this License, contact the copyright holder through:
+https://github.com/SudhanTheDev

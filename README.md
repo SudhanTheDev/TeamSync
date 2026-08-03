@@ -198,3 +198,13 @@ Task completion files are different: TeamSync copies them into `task_attachments
 ## Future improvements
 
 A database server, internet-grade TLS and password libraries, cloud synchronization, mobile clients, instant push notifications, an AI assistant, and voice commands can be added behind the existing service/persistence boundaries without replacing the domain classes.
+
+## License
+
+Copyright (c) 2026 Sudhan Bhattarai. All rights reserved.
+
+TeamSync is **source-available, not open source**. You may clone, compile, and
+run an unchanged copy solely for personal or educational, non-commercial use.
+Modification, derivative works, redistribution, sublicensing, and commercial
+use are prohibited without prior written permission. See [LICENSE](LICENSE) for
+the complete terms.
