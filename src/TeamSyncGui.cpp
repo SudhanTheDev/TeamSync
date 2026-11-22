@@ -1,13 +1,19 @@
 #include "TeamSyncGui.h"
+#include "AppSettings.h"
 
 #include "Dashboard.h"
 #include "Exceptions.h"
 #include "LanSyncManager.h"
 #include "ReportGenerator.h"
+#include "ThemeManager.h"
+#include "PremiumWidgets.h"
+#include "FileDropSupport.h"
+#include "WorkspaceRecovery.h"
 #include "Utils.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QAction>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QClipboard>
@@ -18,43 +24,64 @@
 #include <QDialogButtonBox>
 #include <QDesktopServices>
 #include <QEvent>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFontInfo>
 #include <QFormLayout>
 #include <QFrame>
-#include <QGraphicsDropShadowEffect>
-#include <QGridLayout>
-#include <QGroupBox>
 #include <QHeaderView>
 #include <QIcon>
+#include <QGraphicsDropShadowEffect>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QLocale>
+#include <QMenu>
 #include <QMessageBox>
-#include <QPainter>
-#include <QPlainTextEdit>
-#include <QParallelAnimationGroup>
 #include <QPropertyAnimation>
 #include <QPushButton>
+#include <QPainter>
+#include <QProgressBar>
+#include <QParallelAnimationGroup>
+#include <QProgressDialog>
+#include <QPointer>
 #include <QScrollArea>
+#include <QScopedValueRollback>
 #include <QResizeEvent>
 #include <QSettings>
+#include <QShortcut>
 #include <QSignalBlocker>
 #include <QSpinBox>
-#include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QStandardItemModel>
 #include <QStyle>
 #include <QTableWidget>
+#include <QTableView>
+#include <QThread>
+#include <QTabWidget>
+#include <QStyleHints>
 #include <QTextEdit>
+#include <QToolButton>
+#include <QSvgRenderer>
 #include <QTimer>
 #include <QUrl>
+#include <QUuid>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <chrono>
 #include <sstream>
+#include <set>
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <wincrypt.h>
+#endif
 
 namespace teamsync {
 namespace {
@@ -76,26 +103,101 @@ QDate toQDate(const Date& value) {
     return QDate(value.year(), value.month(), value.day());
 }
 
+void iconFor(QPushButton* control, const QString& name) {
+    control->setProperty("iconName", name);
+    control->setIcon(ThemeManager::icon(name, qApp->property("darkTheme").toBool(), false, control->property("primary").toBool()));
+    control->setIconSize(QSize(16, 16));
+}
+
 QPushButton* button(const QString& text, const bool primary = false) {
-    auto* result = new QPushButton(text);
+    auto* result = new ui::AnimatedButton(text);
     result->setCursor(Qt::PointingHandCursor);
-    result->setMinimumHeight(38);
+    result->setMinimumHeight(34);
     result->setProperty("primary", primary);
+    result->setProperty("iconOnly", text.isEmpty());
+    result->setFocusPolicy(Qt::StrongFocus);
+    result->setAccessibleName(QString(text).replace("&&", "&"));
+    result->setAutoDefault(false);
+    const QString label = text.toLower();
+    if (label.startsWith("new ") || label.startsWith("create ")) iconFor(result, "plus");
+    else if (label.startsWith("refresh") || label == "sync now") iconFor(result, "refresh");
+    else if (label.startsWith("copy ")) iconFor(result, "copy");
+    else if (label.startsWith("host")) iconFor(result, "host");
+    else if (label.contains("join")) iconFor(result, "join");
+    else if (label.contains("complete")) iconFor(result, "check");
     return result;
+}
+
+// A viewport label keeps empty tables useful without fabricating a data row.
+class TableEmptyState final : public QLabel {
+public:
+    explicit TableEmptyState(QTableView* view) : QLabel(view->viewport()), view_(view) {
+        setObjectName("emptyState");
+        setAlignment(Qt::AlignCenter);
+        setWordWrap(true);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        view->viewport()->installEventFilter(this);
+        auto update = [this] {
+            setText(view_->property("emptyText").toString().isEmpty()
+                ? "Nothing to show yet." : view_->property("emptyText").toString());
+            setVisible(view_->model() && view_->model()->rowCount() == 0);
+            setGeometry(view_->viewport()->rect().adjusted(20, 12, -20, -12));
+        };
+        if (view->model()) {
+            QObject::connect(view->model(), &QAbstractItemModel::rowsInserted, this, update);
+            QObject::connect(view->model(), &QAbstractItemModel::rowsRemoved, this, update);
+            QObject::connect(view->model(), &QAbstractItemModel::modelReset, this, update);
+        }
+        QTimer::singleShot(0, this, update);
+    }
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (watched == view_->viewport() && event->type() == QEvent::Resize)
+            setGeometry(view_->viewport()->rect().adjusted(20, 12, -20, -12));
+        return QLabel::eventFilter(watched, event);
+    }
+private:
+    QTableView* view_;
+};
+
+void configureTable(QTableView* result) {
+    result->horizontalHeader()->setStretchLastSection(true);
+    result->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    result->horizontalHeader()->setMinimumSectionSize(48);
+    result->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    result->setSelectionBehavior(QAbstractItemView::SelectRows);
+    result->setSelectionMode(QAbstractItemView::SingleSelection);
+    result->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    result->setAlternatingRowColors(false);
+    result->verticalHeader()->setVisible(false);
+    result->verticalHeader()->setDefaultSectionSize(40);
+    result->setShowGrid(false);
+    result->setWordWrap(false);
+    result->setTextElideMode(Qt::ElideRight);
+    result->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    result->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    result->setCornerButtonEnabled(false);
+    result->setItemDelegate(new ui::ReferenceItemDelegate(result));
+    new TableEmptyState(result);
 }
 
 QTableWidget* table(const QStringList& headings) {
     auto* result = new QTableWidget(0, headings.size());
     result->setHorizontalHeaderLabels(headings);
-    result->horizontalHeader()->setStretchLastSection(true);
-    result->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    result->setSelectionBehavior(QAbstractItemView::SelectRows);
-    result->setSelectionMode(QAbstractItemView::SingleSelection);
-    result->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    result->setAlternatingRowColors(true);
-    result->verticalHeader()->setVisible(false);
-    result->setShowGrid(false);
+    configureTable(result);
+    QObject::connect(result, &QTableWidget::itemChanged, result, [](QTableWidgetItem* item) {
+        if (item->toolTip() != item->text()) item->setToolTip(item->text());
+    });
     return result;
+}
+
+void requireSelection(QTableWidget* source, const std::initializer_list<QPushButton*>& controls) {
+    const QList<QPushButton*> buttons(controls);
+    for (auto* control : buttons) control->setEnabled(false);
+    QObject::connect(source, &QTableWidget::itemSelectionChanged, source, [source, buttons] {
+        const bool selected = !source->selectedItems().empty();
+        for (auto* control : buttons) control->setEnabled(selected);
+    });
 }
 
 QLabel* mutedLabel(const QString& text) {
@@ -108,58 +210,44 @@ QLabel* mutedLabel(const QString& text) {
 QFrame* card() {
     auto* result = new QFrame;
     result->setObjectName("card");
-    auto* shadow = new QGraphicsDropShadowEffect(result);
-    shadow->setBlurRadius(24);
-    shadow->setOffset(0, 8);
-    shadow->setColor(QColor(3, 8, 25, 90));
-    result->setGraphicsEffect(shadow);
+    ui::softShadow(result);
     return result;
-}
-
-QIcon chatBubbleIcon() {
-    QPixmap pixmap(28, 28);
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(QPen(Qt::white, 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawRoundedRect(QRectF(4, 4, 20, 15), 5, 5);
-    painter.drawPolyline(QPolygonF({QPointF(10, 19), QPointF(8, 24), QPointF(15, 19)}));
-    return QIcon(pixmap);
-}
-
-QIcon notificationBellIcon() {
-    QPixmap pixmap(26, 26);
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(QPen(QColor("#dce5f8"), 2.1, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawArc(QRectF(6, 5, 14, 16), 0, 180 * 16);
-    painter.drawLine(QPointF(6, 13), QPointF(4, 19));
-    painter.drawLine(QPointF(4, 19), QPointF(22, 19));
-    painter.drawLine(QPointF(22, 19), QPointF(20, 13));
-    painter.drawArc(QRectF(11, 19, 4, 4), 180 * 16, 180 * 16);
-    return QIcon(pixmap);
-}
-
-QIcon materialGlyphIcon(const ushort glyph, const QColor& color) {
-    QPixmap pixmap(30, 30);
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(color);
-    QFont font("Segoe Fluent Icons", 14);
-    if (!QFontInfo(font).exactMatch()) font.setFamily("Segoe MDL2 Assets");
-    painter.setFont(font);
-    painter.drawText(pixmap.rect(), Qt::AlignCenter, QString(QChar(glyph)));
-    return QIcon(pixmap);
 }
 
 QString joined(const std::vector<std::string>& values) {
     QStringList result;
     for (const auto& value : values) result << q(value);
     return result.join(", ");
+}
+
+QByteArray protectSavedPassword(const QByteArray& value) {
+#ifdef Q_OS_WIN
+    DATA_BLOB source{static_cast<DWORD>(value.size()),
+                     reinterpret_cast<BYTE*>(const_cast<char*>(value.constData()))};
+    DATA_BLOB encrypted{};
+    if (!CryptProtectData(&source, L"TeamSync saved sign-in", nullptr, nullptr, nullptr, 0, &encrypted)) return {};
+    const QByteArray result(reinterpret_cast<const char*>(encrypted.pbData), static_cast<int>(encrypted.cbData));
+    LocalFree(encrypted.pbData);
+    return result;
+#else
+    Q_UNUSED(value);
+    return {};
+#endif
+}
+
+QByteArray unprotectSavedPassword(const QByteArray& value) {
+#ifdef Q_OS_WIN
+    DATA_BLOB encrypted{static_cast<DWORD>(value.size()),
+                        reinterpret_cast<BYTE*>(const_cast<char*>(value.constData()))};
+    DATA_BLOB decrypted{};
+    if (!CryptUnprotectData(&encrypted, nullptr, nullptr, nullptr, nullptr, 0, &decrypted)) return {};
+    const QByteArray result(reinterpret_cast<const char*>(decrypted.pbData), static_cast<int>(decrypted.cbData));
+    LocalFree(decrypted.pbData);
+    return result;
+#else
+    Q_UNUSED(value);
+    return {};
+#endif
 }
 
 } // namespace
@@ -170,132 +258,20 @@ TeamSyncGui::TeamSyncGui(const std::filesystem::path& applicationRoot,
       activeRoot_(localRoot_), service_(std::make_unique<TeamSyncService>(localRoot_)),
       lan_(std::make_unique<LanSyncManager>(localRoot_)),
       networkOptions_(std::move(network)) {
-    QSettings settings("TeamSync", "TeamSync");
-    darkTheme_ = settings.value("appearance/darkTheme", true).toBool();
-    setWindowTitle("TeamSync - Collaboration Workspace");
-    resize(1420, 900);
-    setMinimumSize(1120, 720);
-
-    QPixmap iconPixmap(64, 64);
-    iconPixmap.fill(Qt::transparent);
-    QPainter painter(&iconPixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    QLinearGradient gradient(0, 0, 64, 64);
-    gradient.setColorAt(0, QColor("#7c5cff"));
-    gradient.setColorAt(1, QColor("#16b8f3"));
-    painter.setBrush(gradient);
-    painter.setPen(Qt::NoPen);
-    painter.drawRoundedRect(3, 3, 58, 58, 16, 16);
-    painter.setPen(Qt::white);
-    painter.setFont(QFont("Segoe UI", 18, QFont::Bold));
-    painter.drawText(iconPixmap.rect(), Qt::AlignCenter, "TS");
-    setWindowIcon(QIcon(iconPixmap));
-
-    setStyleSheet(R"QSS(
-        * { font-family: "Segoe UI"; font-size: 10pt; }
-        QMainWindow, QWidget { background: #0a1020; color: #e9edfa; }
-        QLabel { background: transparent; }
-        #authPage { background: #090f1d; }
-        #brandPanel {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                        stop:0 #16113a, stop:0.52 #172d57, stop:1 #087ca8);
-            border-radius: 28px;
-        }
-        #brandTitle { font-size: 36pt; font-weight: 800; color: white; }
-        #brandTagline { font-size: 16pt; font-weight: 600; color: #d8e8ff; }
-        #featureChip {
-            background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.14);
-            border-radius: 13px; color: #eaf4ff; padding: 10px 14px;
-        }
-        #authCard, #card {
-            background: #111a2e; border: 1px solid #243352; border-radius: 18px;
-        }
-        #authHeading { font-size: 24pt; font-weight: 750; color: white; }
-        #shellPage, #pageArea { background: #0d1426; }
-        #sidebar { background: #0b1120; border-right: 1px solid #202b43; }
-        #sidebarLogo { font-size: 20pt; font-weight: 800; color: white; }
-        #sidebarUser { background: #131e34; border: 1px solid #263653; border-radius: 13px; padding: 12px; }
-        #pageHeader { background: #0d1426; border-bottom: 1px solid #202b43; }
-        #pageTitle { font-size: 21pt; font-weight: 750; color: white; }
-        #pageSubtitle, #mutedLabel { color: #94a2bd; }
-        #sectionTitle { font-size: 14pt; font-weight: 700; color: #f2f5ff; }
-        #metricValue { font-size: 25pt; font-weight: 800; color: white; }
-        #metricLabel { color: #9da9c2; font-weight: 600; }
-        #metricAccent { color: #8ee1ff; font-size: 9pt; }
-        #emptyState { color: #76849f; padding: 24px; }
-        QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QDateEdit, QSpinBox {
-            background: #0d1528; color: #edf2ff; border: 1px solid #2a3a59;
-            border-radius: 9px; padding: 8px 10px; min-height: 20px;
-            selection-background-color: #6f5cf4;
-        }
-        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus,
-        QDateEdit:focus, QSpinBox:focus { border: 1px solid #7a68ff; }
-        QComboBox::drop-down { border: none; width: 28px; }
-        QComboBox QAbstractItemView { background: #131e34; color: #edf2ff; selection-background-color: #5f50cf; }
-        QPushButton {
-            background: #1a263e; color: #dce5f8; border: 1px solid #30415f;
-            border-radius: 9px; padding: 8px 14px; font-weight: 650;
-        }
-        QPushButton:hover { background: #253451; border-color: #546b93; }
-        QPushButton:pressed { background: #101a2e; }
-        QPushButton[primary="true"] {
-            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #7658ee,stop:1 #1e9bd7);
-            border: none; color: white;
-        }
-        QPushButton[primary="true"]:hover { background: #6955de; }
-        QPushButton#navButton {
-            background: transparent; border: none; color: #96a4bd; text-align: left;
-            padding: 11px 15px; border-radius: 10px; font-weight: 650;
-        }
-        QPushButton#navButton:hover { background: #141f35; color: white; }
-        QPushButton#navButton:checked {
-            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #302866,stop:1 #183c58);
-            color: white; border-left: 3px solid #826eff;
-        }
-        QPushButton#linkButton { background:transparent; border:none; color:#8fcfff; padding:4px; text-align:right; }
-        QPushButton#linkButton:hover { color:white; text-decoration:underline; }
-        QPushButton#notificationButton { min-width:48px; padding:8px 11px; }
-        QPushButton#notificationButton[hasUnread="true"] { color:white; border-color:#7564ee; background:#282455; }
-        QPushButton#floatingChatButton {
-            border-radius:27px; min-width:54px; max-width:54px; min-height:54px; max-height:54px;
-            background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #7658ee,stop:1 #168fc7);
-            border:1px solid #8d7aff;
-        }
-        QPushButton#floatingChatButton:hover { background:#826df3; border-color:#b4a9ff; }
-        QPushButton#dangerButton, QPushButton#logoutButton { color: #ffb5bc; border-color: #6e3442; background: #2c1721; }
-        QTableWidget {
-            background: #10192c; alternate-background-color: #121e33; border: 1px solid #263550;
-            border-radius: 12px; color: #e8eefc; selection-background-color: #354075;
-            selection-color: white; outline: none;
-        }
-        QHeaderView::section {
-            background: #16223a; color: #aebbd0; border: none; border-bottom: 1px solid #2b3b58;
-            padding: 10px; font-weight: 700;
-        }
-        QTableWidget::item { padding: 8px; border-bottom: 1px solid #1e2b43; }
-        QTableWidget::item:hover { background:#1b2944; }
-        QListWidget {
-            background: #10192c; border: 1px solid #263550; border-radius: 12px;
-            color: #e7edfb; outline: none; padding: 6px;
-        }
-        QListWidget::item { padding: 10px; border-radius: 8px; margin: 2px; }
-        QListWidget::item:selected { background: #354075; }
-        QProgressBar {
-            background: #0c1425; border: 1px solid #283955; border-radius: 8px;
-            text-align: center; color: white; min-height: 17px;
-        }
-        QProgressBar::chunk { border-radius: 7px; background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #735bf1,stop:1 #22b5df); }
-        QGroupBox { border: 1px solid #263550; border-radius: 12px; margin-top: 14px; padding: 14px; font-weight: 700; }
-        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #cbd5eb; }
-        QDialog { background: #0d1426; }
-        QDialogButtonBox QPushButton { min-width: 90px; }
-        QMessageBox { background: #111a2e; }
-        QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
-        QScrollBar::handle:vertical { background: #34445f; border-radius: 5px; min-height: 30px; }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-        QStatusBar { background: #0b1120; color: #93a2bd; border-top: 1px solid #202b43; }
-        QToolTip { background: #17223a; color: white; border: 1px solid #415272; padding: 6px; }
-    )QSS");
+    auto settings = appSettings();
+    const QString preference = settings.value("appearance/theme", "system").toString();
+    darkTheme_ = preference == "system" ? ThemeManager::systemPrefersDark()
+        : preference == "dark";
+    // Migrate the previous light/dark preference without losing the user's choice.
+    if (!settings.contains("appearance/theme") && settings.contains("appearance/darkTheme")) {
+        darkTheme_ = settings.value("appearance/darkTheme").toBool();
+        settings.setValue("appearance/theme", darkTheme_ ? "dark" : "light");
+    }
+    popupAnimations_ = settings.value("appearance/popupAnimations", true).toBool();
+    setWindowTitle("TeamSync");
+    resize(1280, 900);
+    setMinimumSize(980, 720);
+    setWindowIcon(ThemeManager::applicationIcon());
 
     if (networkOptions_.mode == LanLaunchOptions::Mode::Host) {
         lan_->startHost(networkOptions_.port, networkStartupError_, networkOptions_.pairingCode);
@@ -311,15 +287,45 @@ TeamSyncGui::TeamSyncGui(const std::filesystem::path& applicationRoot,
     }
 
     buildInterface();
+    ui::installMotionEffects(this);
     configureLanCallbacks();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this, [this] {
+        if (appSettings().value("appearance/theme", "system").toString() == "system")
+            applyTheme(ThemeManager::systemPrefersDark());
+    });
+#endif
     auto* timer = new QTimer(this);
     timer->setInterval(2000);
     connect(timer, &QTimer::timeout, this, [this] {
+        if (networkBusy_ || operationInProgress_ || QApplication::activeModalWidget() || QApplication::activePopupWidget()) return;
+        if (remoteReloadPending_) { remoteReloadPending_ = false; reloadNetworkData(); }
+        QScopedValueRollback<bool> background(backgroundSync_, true);
         pullNetworkChanges(false);
         updateConnectionUi();
     });
     timer->start();
     animateWindowIn();
+
+    QTimer::singleShot(0, this, [this] { attemptRememberedLogin(); });
+    QTimer::singleShot(120, this, [this] {
+        const auto root = activeRoot_;
+        const QPointer<TeamSyncGui> owner(this);
+        backupWorker_ = std::thread([root, owner] {
+            // Sign-in may atomically replace activity records while startup is
+            // taking inventory. A checked, optimistic copy is safe to retry;
+            // normal login activity is not a user-facing recovery error.
+            for (int attempt = 0; attempt < 3; ++attempt) {
+                try { WorkspaceRecovery(root).createBackup("Automatic daily safety backup", true); return; }
+                catch (const std::exception&) {
+                    if (attempt < 2) std::this_thread::sleep_for(std::chrono::milliseconds(350 * (attempt + 1)));
+                }
+            }
+            if (owner) QMetaObject::invokeMethod(owner, [owner] {
+                if (owner) owner->showStatus("Automatic backup postponed while files are busy. You can create a backup from Settings.");
+            }, Qt::QueuedConnection);
+        });
+    });
 
     if (!networkStartupError_.isEmpty()) {
         QTimer::singleShot(250, this, [this] {
@@ -338,7 +344,9 @@ TeamSyncGui::TeamSyncGui(const std::filesystem::path& applicationRoot,
     }
 }
 
-TeamSyncGui::~TeamSyncGui() = default;
+TeamSyncGui::~TeamSyncGui() {
+    if (backupWorker_.joinable()) backupWorker_.join();
+}
 
 void TeamSyncGui::buildInterface() {
     rootStack_ = new QStackedWidget;
@@ -353,125 +361,240 @@ void TeamSyncGui::buildInterface() {
 }
 
 QWidget* TeamSyncGui::buildAuthPage() {
-    auto* page = new QWidget;
+    auto* page = new ui::ReferenceBackdrop;
     page->setObjectName("authPage");
     auto* outer = new QHBoxLayout(page);
-    outer->setContentsMargins(34, 34, 34, 34);
-    outer->setSpacing(34);
+    outer->setContentsMargins(32, 32, 32, 24);
+    outer->setSpacing(32);
 
-    auto* brand = new QFrame;
-    brand->setObjectName("brandPanel");
-    brand->setMinimumWidth(500);
+    auto* brand = new QWidget;
+    brand->setObjectName("loginBrand");
     auto* brandLayout = new QVBoxLayout(brand);
-    brandLayout->setContentsMargins(52, 52, 52, 52);
-    brandLayout->setSpacing(18);
-    auto* logo = new QLabel("TS  TeamSync");
-    logo->setObjectName("brandTitle");
-    brandLayout->addWidget(logo);
-    brandLayout->addSpacing(45);
-    auto* tagline = new QLabel("One workspace. Clear ownership.\nBetter teamwork.");
-    tagline->setObjectName("brandTagline");
+    brandLayout->setContentsMargins(8, 20, 8, 0);
+    brandLayout->setSpacing(12);
+    brandLayout->addSpacing(20);
+    auto* logo = new QLabel;
+    logo->setPixmap(ThemeManager::applicationIcon().pixmap(80, 80));
+    brandLayout->addWidget(logo, 0, Qt::AlignHCenter);
+    auto* wordmark = new QLabel("TeamSync");
+    wordmark->setObjectName("loginWordmark");
+    brandLayout->addWidget(wordmark, 0, Qt::AlignHCenter);
+    auto* tagline = new QLabel("Collaborate. Organize. Get things done.");
+    tagline->setObjectName("loginTagline");
+    tagline->setAlignment(Qt::AlignCenter);
     tagline->setWordWrap(true);
     brandLayout->addWidget(tagline);
-    brandLayout->addWidget(mutedLabel("Plan projects, assign work, share updates, and understand status without losing the human context."));
-    brandLayout->addSpacing(22);
-    for (const QString& feature : {"Live project and task overview", "Focused team conversations", "Smart workload recommendations"}) {
-        auto* chip = new QLabel("  ✓  " + feature);
-        chip->setObjectName("featureChip");
-        brandLayout->addWidget(chip);
+    brandLayout->addSpacing(18);
+    auto* features = new QWidget;
+    features->setMaximumWidth(380);
+    auto* featureLayout = new QVBoxLayout(features);
+    featureLayout->setContentsMargins(0, 0, 0, 0);
+    featureLayout->setSpacing(24);
+    const std::array<QStringList, 3> highlights{{
+        {"teams", "Work together", "Manage projects and tasks\nwith your team."},
+        {"activity", "Stay in sync", "Share files, discuss ideas\nand get real-time updates."},
+        {"tasks", "Your workspace", "Local-first with optional\nteam connection."}
+    }};
+    for (const auto& feature : highlights) {
+        auto* row = new QHBoxLayout;
+        row->setSpacing(16);
+        auto* tile = new ui::IconTile(feature[0], "blue", 52);
+        tile->setProperty("circular", true);
+        row->addWidget(tile);
+        auto* text = new QVBoxLayout;
+        text->setSpacing(4);
+        auto* title = new QLabel(feature[1]);
+        title->setObjectName("featureTitle");
+        auto* description = new QLabel(feature[2]);
+        description->setObjectName("featureBody");
+        description->setWordWrap(true);
+        text->addWidget(title);
+        text->addWidget(description);
+        row->addLayout(text, 1);
+        featureLayout->addLayout(row);
     }
-    brandLayout->addStretch();
-    auto* privacy = new QLabel("LOCAL-FIRST  •  OPTIONAL TRUSTED LAN SHARING");
-    privacy->setObjectName("privacyLabel");
-    brandLayout->addWidget(privacy);
+    brandLayout->addWidget(features, 0, Qt::AlignHCenter);
+    brandLayout->addSpacing(12);
+    class CollaborationArt final : public QWidget {
+    public:
+        CollaborationArt() : renderer_(QString(":/teamsync/team-collaboration.svg")) {
+            setMinimumHeight(100);
+            setMaximumHeight(285);
+            setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        }
+    protected:
+        void paintEvent(QPaintEvent*) override {
+            QPainter painter(this);
+            painter.setRenderHint(QPainter::Antialiasing);
+            QSizeF size = renderer_.viewBoxF().size();
+            size.scale(this->size(), Qt::KeepAspectRatio);
+            renderer_.render(&painter, QRectF((width() - size.width())/2, height() - size.height(), size.width(), size.height()));
+        }
+    private:
+        QSvgRenderer renderer_;
+    };
+    brandLayout->addWidget(new CollaborationArt, 2);
+    outer->addWidget(brand, 44);
 
-    auto* loginArea = new QWidget;
-    auto* loginAreaLayout = new QVBoxLayout(loginArea);
-    loginAreaLayout->setContentsMargins(24, 34, 24, 34);
-    authThemeButton_ = button("");
-    authThemeButton_->setObjectName("themeButton");
-    authThemeButton_->setToolTip("Switch between dark and light theme");
-    loginAreaLayout->addWidget(authThemeButton_, 0, Qt::AlignRight);
-    loginAreaLayout->addStretch();
+    auto* right = new QWidget;
+    auto* rightLayout = new QVBoxLayout(right);
+    rightLayout->setContentsMargins(8, 8, 12, 8);
+    rightLayout->setSpacing(16);
+    rightLayout->addStretch();
     auto* loginCard = card();
     loginCard->setObjectName("authCard");
-    loginCard->setMinimumWidth(440);
-    loginCard->setMaximumWidth(500);
-    auto* formLayout = new QVBoxLayout(loginCard);
-    formLayout->setContentsMargins(30, 28, 30, 28);
-    formLayout->setSpacing(9);
+    loginCard->setMinimumWidth(412);
+    loginCard->setMaximumWidth(530);
+    ui::softShadow(loginCard, 38, 10);
+    auto* form = new QVBoxLayout(loginCard);
+    form->setSizeConstraint(QLayout::SetDefaultConstraint);
+    form->setContentsMargins(32, 28, 32, 26);
+    form->setSpacing(12);
     auto* heading = new QLabel("Welcome back");
     heading->setObjectName("authHeading");
-    formLayout->addWidget(heading);
-    formLayout->addWidget(mutedLabel("Sign in to continue to your TeamSync workspace."));
-    formLayout->addSpacing(10);
-    formLayout->addWidget(new QLabel("Username"));
+    form->addWidget(heading);
+    form->addWidget(mutedLabel("Sign in to your TeamSync workspace"));
+    form->addSpacing(8);
     loginUsername_ = new QLineEdit;
     loginUsername_->setObjectName("loginUsername");
-    loginUsername_->setPlaceholderText("Enter your username");
+    loginUsername_->setAccessibleName("Username");
+    loginUsername_->setPlaceholderText("Username");
+    loginUsername_->setMinimumHeight(38);
     loginUsername_->setClearButtonEnabled(true);
-    formLayout->addWidget(loginUsername_);
-    formLayout->addWidget(new QLabel("Password"));
+    loginUsername_->addAction(ThemeManager::icon("user", darkTheme_), QLineEdit::LeadingPosition);
     loginPassword_ = new QLineEdit;
     loginPassword_->setObjectName("loginPassword");
-    loginPassword_->setPlaceholderText("Enter your password");
+    loginPassword_->setAccessibleName("Password");
+    loginPassword_->setPlaceholderText("Password");
+    loginPassword_->setMinimumHeight(38);
     loginPassword_->setEchoMode(QLineEdit::Password);
-    formLayout->addWidget(loginPassword_);
-    auto* forgotPassword = new QPushButton("Forgot password?");
-    forgotPassword->setObjectName("linkButton");
-    forgotPassword->setCursor(Qt::PointingHandCursor);
-    forgotPassword->setToolTip("Reset using the email saved on your account");
-    formLayout->addWidget(forgotPassword, 0, Qt::AlignRight);
+    loginPassword_->addAction(ThemeManager::icon("lock", darkTheme_), QLineEdit::LeadingPosition);
+    auto* reveal = loginPassword_->addAction(ThemeManager::icon("eye", darkTheme_), QLineEdit::TrailingPosition);
+    reveal->setObjectName("passwordVisibilityAction");
+    reveal->setToolTip("Show password");
+    connect(reveal, &QAction::triggered, this, [this, reveal] {
+        const bool show = loginPassword_->echoMode() == QLineEdit::Password;
+        loginPassword_->setEchoMode(show ? QLineEdit::Normal : QLineEdit::Password);
+        reveal->setIcon(ThemeManager::icon(show ? "eye-off" : "eye", darkTheme_));
+        reveal->setToolTip(show ? "Hide password" : "Show password");
+    });
+    form->addWidget(loginUsername_);
+    form->addWidget(loginPassword_);
+    auto* options = new QHBoxLayout;
+    rememberLogin_ = new QCheckBox("Keep me signed in");
+    rememberLogin_->setObjectName("rememberLogin");
+    rememberLogin_->setChecked(true);
+    rememberLogin_->setToolTip("Save sign-in with Windows account encryption");
+    options->addWidget(rememberLogin_);
+    options->addStretch();
+    auto* forgot = button("Forgot password?");
+    forgot->setObjectName("forgotPasswordButton");
+    forgot->setProperty("link", true);
+    options->addWidget(forgot);
+    form->addLayout(options);
     auto* login = button("Sign in", true);
     login->setObjectName("loginButton");
-    login->setMinimumHeight(44);
-    formLayout->addWidget(login);
-    auto* registerButton = button("Create a new account");
-    formLayout->addWidget(registerButton);
-    auto* tutorial = button("Tutorial && Credits");
-    tutorial->setObjectName("tonalButton");
-    formLayout->addWidget(tutorial);
-    auto* connectionBox = new QFrame;
-    connectionBox->setObjectName("connectionPanel");
-    connectionBox->setMinimumHeight(125);
-    auto* connectionLayout = new QVBoxLayout(connectionBox);
-    connectionLayout->setContentsMargins(12, 10, 12, 10);
-    connectionLayout->setSpacing(7);
+    login->setMinimumHeight(42);
+    form->addWidget(login);
+    auto* divider = new QHBoxLayout;
+    auto* lineA = new QFrame; lineA->setFrameShape(QFrame::HLine);
+    auto* lineB = new QFrame; lineB->setFrameShape(QFrame::HLine);
+    lineA->setObjectName("authDivider");
+    lineB->setObjectName("authDivider");
+    divider->addWidget(lineA, 1);
+    auto* orLabel = mutedLabel("or");
+    orLabel->setAlignment(Qt::AlignCenter);
+    divider->addWidget(orLabel);
+    divider->addWidget(lineB, 1);
+    form->addLayout(divider);
+    auto* registration = button("Create a new account");
+    registration->setIcon({});
+    registration->setProperty("iconName", QString());
+    registration->setObjectName("registerButton");
+    auto* guest = button("Continue as guest");
+    guest->setObjectName("guestButton");
+    form->addWidget(registration);
+    form->addWidget(guest);
+    form->addSpacing(4);
+
+    auto* connection = new QFrame;
+    connection->setObjectName("connectionPanel");
+    auto* connectionLayout = new QVBoxLayout(connection);
+    connectionLayout->setContentsMargins(16, 14, 16, 14);
+    connectionLayout->setSpacing(10);
     auto* connectionTitle = new QLabel("Workspace connection");
     connectionTitle->setObjectName("connectionPanelTitle");
     connectionLayout->addWidget(connectionTitle);
-    networkStatus_ = mutedLabel("Connection: " + lan_->statusText());
-    networkStatus_->setWordWrap(true);
-    networkStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    connectionLayout->addWidget(networkStatus_);
-    auto* connectionActions = new QHBoxLayout;
+    auto* choices = new QHBoxLayout;
+    choices->setSpacing(8);
+    auto* choiceGroup = new QButtonGroup(connection);
     auto* local = button("Local");
     local->setObjectName("localConnectionButton");
-    auto* host = button("Host", true);
+    auto* host = button("Host");
     host->setObjectName("hostConnectionButton");
     auto* join = button("Join");
     join->setObjectName("joinConnectionButton");
-    connectionActions->addWidget(local);
-    connectionActions->addWidget(host);
-    connectionActions->addWidget(join);
-    connectionLayout->addLayout(connectionActions);
-    formLayout->addWidget(connectionBox);
-    loginAreaLayout->addWidget(loginCard, 0, Qt::AlignHCenter);
-    loginAreaLayout->addStretch();
+    for (auto* choice : {local, host, join}) {
+        choice->setIcon({});
+        choice->setProperty("iconName", QString());
+        choice->setProperty("connectionChoice", true);
+        choice->setCheckable(true);
+        choiceGroup->addButton(choice);
+        choices->addWidget(choice, 1);
+    }
+    local->setChecked(true);
+    connectionLayout->addLayout(choices);
+    networkStatus_ = mutedLabel("Use a local workspace on this computer");
+    networkStatus_->setObjectName("authConnectionStatus");
+    networkStatus_->setWordWrap(true);
+    networkStatus_->setMinimumHeight(30);
+    networkStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    connectionLayout->addWidget(networkStatus_);
+    form->addWidget(connection);
+    rightLayout->addWidget(loginCard);
+    auto* footer = new QHBoxLayout;
+    footer->addStretch();
+    auto* taglineFooter = mutedLabel("●  ●   Simple tools. Strong teams.");
+    taglineFooter->setWordWrap(false);
+    taglineFooter->setObjectName("loginFooter");
+    footer->addWidget(taglineFooter);
+    auto* help = button("Tutorial && Credits");
+    help->setProperty("link", true);
+    footer->addWidget(help);
+    authThemeButton_ = button("");
+    authThemeButton_->setObjectName("themeButton");
+    authThemeButton_->setAccessibleName("Switch color theme");
+    footer->addWidget(authThemeButton_);
+    footer->addStretch();
+    rightLayout->addLayout(footer);
+    rightLayout->addStretch();
+    auto* scroll = new QScrollArea;
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidgetResizable(true);
+    scroll->setWidget(right);
+    outer->addWidget(scroll, 56);
 
-    outer->addWidget(brand, 11);
-    outer->addWidget(loginArea, 9);
-
+    QWidget::setTabOrder(loginUsername_, loginPassword_);
+    QWidget::setTabOrder(loginPassword_, rememberLogin_);
+    QWidget::setTabOrder(rememberLogin_, forgot);
+    QWidget::setTabOrder(forgot, login);
+    QWidget::setTabOrder(login, registration);
+    QWidget::setTabOrder(registration, guest);
     connect(login, &QPushButton::clicked, this, [this] { attemptLogin(); });
     connect(loginPassword_, &QLineEdit::returnPressed, this, [this] { attemptLogin(); });
     connect(loginUsername_, &QLineEdit::returnPressed, loginPassword_, qOverload<>(&QWidget::setFocus));
-    connect(registerButton, &QPushButton::clicked, this, [this] { showRegistrationDialog(); });
-    connect(forgotPassword, &QPushButton::clicked, this, [this] { showForgotPasswordDialog(); });
-    connect(tutorial, &QPushButton::clicked, this, [this] { showTutorialAndCreditsDialog(); });
+    for (auto* input : {loginUsername_, loginPassword_}) connect(input, &QLineEdit::textChanged, this, [input] {
+        input->setProperty("validationError", false);
+        input->style()->unpolish(input); input->style()->polish(input);
+    });
+    connect(registration, &QPushButton::clicked, this, [this] { showRegistrationDialog(); });
+    connect(guest, &QPushButton::clicked, this, [this] { showGuestDialog(); });
+    connect(forgot, &QPushButton::clicked, this, [this] { showForgotPasswordDialog(); });
+    connect(help, &QPushButton::clicked, this, [this] { showTutorialAndCreditsDialog(); });
     connect(authThemeButton_, &QPushButton::clicked, this, [this] { toggleTheme(); });
     connect(local, &QPushButton::clicked, this, [this] { switchToLocalWorkspace(); });
-    connect(host, &QPushButton::clicked, this, [this] { startHostingDialog(); });
-    connect(join, &QPushButton::clicked, this, [this] { showJoinWorkspaceDialog(); });
+    connect(host, &QPushButton::clicked, this, [this] { startHostingDialog(); updateConnectionUi(); });
+    connect(join, &QPushButton::clicked, this, [this] { showJoinWorkspaceDialog(); updateConnectionUi(); });
     return page;
 }
 
@@ -481,85 +604,141 @@ QWidget* TeamSyncGui::buildShellPage() {
     auto* shell = new QHBoxLayout(page);
     shell->setContentsMargins(0, 0, 0, 0);
     shell->setSpacing(0);
-
     auto* sidebar = new QFrame;
     sidebar->setObjectName("sidebar");
-    sidebar->setFixedWidth(246);
-    auto* sidebarLayout = new QVBoxLayout(sidebar);
-    sidebarLayout->setContentsMargins(18, 24, 18, 20);
-    sidebarLayout->setSpacing(7);
-    auto* logo = new QLabel("TS  TeamSync");
-    logo->setObjectName("sidebarLogo");
-    sidebarLayout->addWidget(logo);
-    sidebarLayout->addSpacing(18);
-    signedInUser_ = new QLabel("Not signed in");
-    signedInUser_->setObjectName("sidebarUser");
-    signedInUser_->setWordWrap(true);
-    sidebarLayout->addWidget(signedInUser_);
-    sidebarLayout->addSpacing(14);
-
-    const QStringList labels = {
-        "Overview", "Teams", "Projects", "Tasks", "Shared files",
-        "Reports", "Activity", "Connection", "Tutorial && Credits", "My profile"
-    };
+    sidebar->setFixedWidth(220);
+    auto* navigation = new QVBoxLayout(sidebar);
+    navigation->setContentsMargins(12, 22, 12, 12);
+    navigation->setSpacing(4);
+    auto* brandRow = new QHBoxLayout;
+    brandRow->setContentsMargins(8, 0, 8, 0);
+    brandRow->setSpacing(10);
+    auto* logo = new QLabel;
+    logo->setPixmap(ThemeManager::applicationIcon().pixmap(32, 32));
+    brandRow->addWidget(logo);
+    auto* name = new QLabel("TeamSync");
+    name->setObjectName("sidebarLogo");
+    brandRow->addWidget(name);
+    brandRow->addStretch();
+    navigation->addLayout(brandRow);
+    navigation->addSpacing(18);
+    auto* section = new QLabel("WORKSPACE");
+    section->setObjectName("navSection");
+    navigation->addWidget(section);
+    const QStringList labels = {"Overview", "Teams", "Projects", "Tasks", "Shared files",
+        "Reports", "Activity", "Connection", "Help && Tutorial", "My profile", "Settings"};
+    const QStringList icons = {"overview", "teams", "projects", "tasks", "files",
+        "reports", "activity", "connection", "help", "user", "settings"};
+    navigationButtons_.resize(PageCount);
     auto* group = new QButtonGroup(sidebar);
     group->setExclusive(true);
-    for (int index = 0; index < labels.size(); ++index) {
-        auto* nav = new QPushButton(labels[index]);
-        nav->setObjectName("navButton");
-        nav->setCheckable(true);
-        nav->setCursor(Qt::PointingHandCursor);
-        nav->setMinimumHeight(42);
-        group->addButton(nav, index);
-        sidebarLayout->addWidget(nav);
-        navigationButtons_.push_back(nav);
-        connect(nav, &QPushButton::clicked, this, [this, index] { navigateTo(static_cast<Page>(index)); });
-    }
-    sidebarLayout->addStretch();
-    auto* logoutButton = button("Sign out");
-    logoutButton->setObjectName("logoutButton");
-    sidebarLayout->addWidget(logoutButton);
-    connect(logoutButton, &QPushButton::clicked, this, [this] { logout(); });
+    auto addNav = [&](int index, bool addToColumn = true) {
+        auto* control = button(labels[index]);
+        control->setObjectName("navButton");
+        control->setProperty("pageIndex", index);
+        control->setProperty("pageName", QString(labels[index]).replace("&&", "&"));
+        control->setCheckable(true);
+        control->setFixedHeight(40);
+        iconFor(control, icons[index]);
+        control->setToolTip(index < 8 ? labels[index] + QString(" (Ctrl+%1)").arg(index + 1) : labels[index]);
+        group->addButton(control, index);
+        if (addToColumn) navigation->addWidget(control);
+        navigationButtons_[index] = control;
+        connect(control, &QPushButton::clicked, this, [this, index] { navigateTo(static_cast<Page>(index)); });
+        return control;
+    };
+    for (int i = 0; i < 8; ++i) addNav(i);
+    navigationIndicator_ = new QWidget(sidebar);
+    navigationIndicator_->setObjectName("navigationIndicator");
+    navigationIndicator_->setAttribute(Qt::WA_TransparentForMouseEvents);
+    navigationIndicator_->setAutoFillBackground(true);
+    navigationIndicator_->hide();
+    navigation->addStretch();
+    addNav(SettingsPage);
+    addNav(TutorialPage);
+    auto* profileRow = new QHBoxLayout;
+    profileRow->setContentsMargins(0, 6, 0, 0);
+    profileRow->setSpacing(0);
+    auto* profile = new ui::ProfileButton("My profile", "Team member");
+    profile->setProperty("pageIndex", ProfilePage);
+    profile->setProperty("pageName", "My profile");
+    navigationButtons_[ProfilePage] = profile;
+    profile->setCheckable(true);
+    group->addButton(profile, ProfilePage);
+    profileRow->addWidget(profile, 1);
+    auto* accountMenu = new QMenu(profile);
+    accountMenu->setObjectName("accountMenu");
+    accountMenu->addAction("My profile", this, [this] { navigateTo(ProfilePage); });
+    accountMenu->addAction("Settings", this, [this] { navigateTo(SettingsPage); });
+    accountMenu->addSeparator();
+    accountMenu->addAction("Sign out", this, [this] { logout(); });
+    profile->setMenu(accountMenu);
+    navigation->addLayout(profileRow);
+    signedInUser_ = new QLabel(sidebar);
+    signedInUser_->hide();
 
-    auto* pageArea = new QWidget;
-    pageArea->setObjectName("pageArea");
-    auto* pageLayout = new QVBoxLayout(pageArea);
-    pageLayout->setContentsMargins(0, 0, 0, 0);
-    pageLayout->setSpacing(0);
+    auto* area = new QWidget;
+    area->setObjectName("pageArea");
+    auto* body = new QVBoxLayout(area);
+    body->setContentsMargins(0, 0, 0, 0);
+    body->setSpacing(0);
     auto* header = new QFrame;
     header->setObjectName("pageHeader");
-    header->setFixedHeight(92);
     auto* headerLayout = new QHBoxLayout(header);
-    headerLayout->setContentsMargins(30, 14, 30, 14);
+    headerLayout->setContentsMargins(28, 24, 24, 20);
+    headerLayout->setSpacing(12);
     auto* titles = new QVBoxLayout;
+    titles->setSpacing(4);
     pageTitle_ = new QLabel("Overview");
     pageTitle_->setObjectName("pageTitle");
-    pageSubtitle_ = new QLabel("Your workspace at a glance");
+    pageSubtitle_ = mutedLabel("Your workspace at a glance");
     pageSubtitle_->setObjectName("pageSubtitle");
     titles->addWidget(pageTitle_);
     titles->addWidget(pageSubtitle_);
-    headerLayout->addLayout(titles);
-    headerLayout->addStretch();
+    headerLayout->addLayout(titles, 1);
+    globalSearch_ = new QLineEdit;
+    globalSearch_->setObjectName("referenceSearch");
+    globalSearch_->setPlaceholderText("Search anything...");
+    globalSearch_->setAccessibleName("Search workspace");
+    globalSearch_->setClearButtonEnabled(true);
+    globalSearch_->setFixedWidth(264);
+    globalSearch_->addAction(ThemeManager::icon("search", darkTheme_), QLineEdit::LeadingPosition);
+    headerLayout->addWidget(globalSearch_);
+    pageHeaderAction_ = button("New project", true);
+    pageHeaderAction_->setObjectName("pageHeaderAction");
+    iconFor(pageHeaderAction_, "plus");
+    headerLayout->addWidget(pageHeaderAction_);
+    pageHeaderAction_->hide();
+    connect(pageHeaderAction_, &QPushButton::clicked, this, [this] {
+        if (contentStack_->currentIndex() == ProjectsPage) showProjectDialog(false);
+        else if (contentStack_->currentIndex() == TasksPage) showTaskDialog(false);
+    });
     notificationButton_ = button("");
     notificationButton_->setObjectName("notificationButton");
-    notificationButton_->setIcon(notificationBellIcon());
-    notificationButton_->setIconSize(QSize(24, 24));
-    notificationButton_->setToolTip("Open notifications");
+    notificationButton_->setAccessibleName("Notifications");
+    notificationButton_->setFixedSize(34, 34);
+    iconFor(notificationButton_, "bell");
+    auto* dot = new QLabel(notificationButton_);
+    dot->setObjectName("notificationDot");
+    dot->setFixedSize(8, 8);
+    dot->move(24, 3);
+    dot->hide();
     headerLayout->addWidget(notificationButton_);
     shellThemeButton_ = button("");
     shellThemeButton_->setObjectName("themeButton");
-    shellThemeButton_->setToolTip("Switch between dark and light theme");
+    shellThemeButton_->setAccessibleName("Switch color theme");
     headerLayout->addWidget(shellThemeButton_);
-    auto* refresh = button("Refresh");
-    headerLayout->addWidget(refresh);
-    connect(refresh, &QPushButton::clicked, this, [this] { refreshCurrentPage(); showStatus("Workspace refreshed"); });
+    body->addWidget(header);
+    connectionBadge_ = button("Local");
+    connectionBadge_->setParent(header);
+    connectionBadge_->setObjectName("connectionBadge");
+    connectionBadge_->hide();
     connect(notificationButton_, &QPushButton::clicked, this, [this] { showNotificationsPanel(); });
     connect(shellThemeButton_, &QPushButton::clicked, this, [this] { toggleTheme(); });
-    pageLayout->addWidget(header);
+    connect(globalSearch_, &QLineEdit::returnPressed, this, [this] { showGlobalSearch(); });
 
     contentStack_ = new QStackedWidget;
     contentStack_->setObjectName("contentStack");
-    contentStack_->setContentsMargins(0, 0, 0, 0);
     contentStack_->addWidget(buildDashboardPage());
     contentStack_->addWidget(buildTeamsPage());
     contentStack_->addWidget(buildProjectsPage());
@@ -570,76 +749,127 @@ QWidget* TeamSyncGui::buildShellPage() {
     contentStack_->addWidget(buildConnectionPage());
     contentStack_->addWidget(buildTutorialPage());
     contentStack_->addWidget(buildProfilePage());
-    pageLayout->addWidget(contentStack_, 1);
-
-    floatingChatButton_ = new QPushButton(pageArea);
+    contentStack_->addWidget(buildSettingsPage());
+    body->addWidget(contentStack_, 1);
+    auto* chatRow = new QHBoxLayout;
+    chatRow->setContentsMargins(20, 0, 20, 8);
+    chatRow->addStretch();
+    floatingChatButton_ = button("");
     floatingChatButton_->setObjectName("floatingChatButton");
-    floatingChatButton_->setIcon(chatBubbleIcon());
-    floatingChatButton_->setIconSize(QSize(28, 28));
-    floatingChatButton_->setFixedSize(58, 58);
-    floatingChatButton_->setCursor(Qt::PointingHandCursor);
-    floatingChatButton_->setToolTip("Open team chat");
+    floatingChatButton_->setFixedSize(36, 34);
     floatingChatButton_->setAccessibleName("Open team chat");
-    auto* chatShadow = new QGraphicsDropShadowEffect(floatingChatButton_);
-    chatShadow->setBlurRadius(28);
-    chatShadow->setOffset(0, 8);
-    chatShadow->setColor(QColor(73, 89, 255, 150));
-    floatingChatButton_->setGraphicsEffect(chatShadow);
-    floatingChatButton_->raise();
-    pageArea->installEventFilter(this);
+    floatingChatButton_->setToolTip("Team chat");
+    iconFor(floatingChatButton_, "chat");
+    chatRow->addWidget(floatingChatButton_);
+    body->addLayout(chatRow);
     connect(floatingChatButton_, &QPushButton::clicked, this, [this] { showChatPanel(); });
-
     shell->addWidget(sidebar);
-    shell->addWidget(pageArea, 1);
-    QTimer::singleShot(0, this, [this] {
-        if (floatingChatButton_ && floatingChatButton_->parentWidget()) {
-            floatingChatButton_->move(floatingChatButton_->parentWidget()->width() - 88,
-                                      floatingChatButton_->parentWidget()->height() - 88);
-            floatingChatButton_->raise();
-        }
+    shell->addWidget(area, 1);
+    for (int index = 0; index < 8; ++index) {
+        auto* shortcut = new QShortcut(QKeySequence(QString("Ctrl+%1").arg(index + 1)), this);
+        connect(shortcut, &QShortcut::activated, this, [this, index] {
+            if (currentUser_ && !networkBusy_) navigateTo(static_cast<Page>(index));
+        });
+    }
+    auto* help = new QShortcut(QKeySequence(Qt::Key_F1), this);
+    connect(help, &QShortcut::activated, this, [this] {
+        if (currentUser_) navigateTo(TutorialPage); else showTutorialAndCreditsDialog();
     });
+    auto* settings = new QShortcut(QKeySequence("Ctrl+,"), this);
+    connect(settings, &QShortcut::activated, this, [this] { if (currentUser_) navigateTo(SettingsPage); });
+    auto* reload = new QShortcut(QKeySequence("Ctrl+R"), this);
+    connect(reload, &QShortcut::activated, this, [this] { if (currentUser_ && !networkBusy_) refreshCurrentPage(); });
+    auto* search = new QShortcut(QKeySequence("Ctrl+K"), this);
+    connect(search, &QShortcut::activated, this, [this] { if (currentUser_) { globalSearch_->show(); globalSearch_->setFocus(); } });
     return page;
 }
 
+bool TeamSyncGui::runNetworkOperation(const std::function<bool()>& action, const QString& message,
+                                      LanSyncManager* operationManager) {
+    if (networkBusy_) return false;
+    networkBusy_ = true;
+    auto* manager = operationManager ? operationManager : lan_.get();
+    QProgressDialog progress(message, "Cancel transfer", 0, 0, QApplication::activeModalWidget()
+        ? QApplication::activeModalWidget() : this);
+    progress.setObjectName("networkProgress");
+    progress.setWindowTitle("TeamSync");
+    progress.setWindowModality(Qt::ApplicationModal);
+    progress.setMinimumDuration(backgroundSync_ ? 2147483647 : 250);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+    progress.setValue(0);
+    connect(&progress, &QProgressDialog::canceled, &progress, [manager] { manager->cancelTransfer(); });
+    QTimer details;
+    details.setInterval(100);
+    connect(&details, &QTimer::timeout, &progress, [&] {
+        const auto value = manager->progress();
+        if (!value.active) return;
+        QString info = q(value.phase);
+        if (!value.file.empty()) info += "\n" + q(value.file);
+        if (value.total) {
+            progress.setRange(0, 1000);
+            progress.setValue(static_cast<int>(1000.0 * value.transferred / value.total));
+            info += "\n" + QLocale().formattedDataSize(static_cast<qint64>(value.transferred)) + " / " +
+                QLocale().formattedDataSize(static_cast<qint64>(value.total));
+            if (value.bytesPerSecond > 0)
+                info += " · " + QLocale().formattedDataSize(static_cast<qint64>(value.bytesPerSecond)) + "/s";
+        } else progress.setRange(0, 0);
+        progress.setLabelText(info);
+    });
+    details.start();
+    QEventLoop loop;
+    bool result = false;
+    std::exception_ptr failure;
+    auto* worker = QThread::create([&] {
+        try { result = action(); } catch (...) { failure = std::current_exception(); }
+    });
+    connect(worker, &QThread::finished, &loop, &QEventLoop::quit);
+    worker->start();
+    loop.exec();
+    worker->wait();
+    details.stop();
+    delete worker;
+    progress.close();
+    networkBusy_ = false;
+    if (failure) std::rethrow_exception(failure);
+    return result;
+}
+
 bool TeamSyncGui::perform(const std::function<void()>& action, const QString& successMessage) {
+    if (networkBusy_) { showStatus("Synchronization is busy. Wait or cancel it from Transfers & sync.", false); return false; }
+    const bool outer = !operationInProgress_;
+    QScopedValueRollback<bool> guard(operationInProgress_, true);
     try {
-        if (lan_->mode() == LanSyncManager::Mode::Client) {
+        if (outer && remoteReloadPending_) { remoteReloadPending_ = false; reloadNetworkData(); }
+        // A failed connection must not prevent local work. The shared engine
+        // retains its baseline and never pulls over pending local changes.
+        if (outer && lan_->mode() == LanSyncManager::Mode::Client && networkOnline_) {
             bool changed = false;
-            QString networkError;
-            if (!lan_->pull(changed, networkError)) {
-                networkOnline_ = false;
-                lastNetworkError_ = networkError;
-                updateConnectionUi();
-                throw PersistenceError(s(networkError));
-            }
-            networkOnline_ = true;
-            lastNetworkError_.clear();
+            QString problem;
+            networkOnline_ = runNetworkOperation([&] { return lan_->sync(changed, problem); }, "Checking workspace updates…");
+            lastNetworkError_ = problem;
             if (changed) reloadNetworkData();
         }
-        const auto before = lan_->mode() == LanSyncManager::Mode::Local
-            ? QByteArray{} : lan_->workspaceFingerprint();
-        action();
-        if (lan_->mode() != LanSyncManager::Mode::Local &&
-            before != lan_->workspaceFingerprint()) {
-            if (lan_->mode() == LanSyncManager::Mode::Host) {
-                lan_->noteLocalChange();
-            } else {
-                QString networkError;
-                if (!lan_->push(networkError)) {
-                    networkOnline_ = false;
-                    lastNetworkError_ = networkError;
-                    const int userId = currentUser_ ? currentUser_->id() : 0;
-                    service_->reload();
-                    currentUser_ = nullptr;
-                    if (userId > 0) {
-                        try { currentUser_ = &service_->user(userId); } catch (...) {}
-                    }
-                    throw PersistenceError(s(networkError));
+        const auto before = outer && lan_->mode() != LanSyncManager::Mode::Local
+            ? lan_->workspaceFingerprint() : QByteArray{};
+        lan_->executeLocalMutation(action);
+        bool queued = false;
+        if (outer && lan_->mode() != LanSyncManager::Mode::Local && before != lan_->workspaceFingerprint()) {
+            lan_->noteLocalChange();
+            if (lan_->mode() == LanSyncManager::Mode::Client) {
+                queued = true;
+                if (networkOnline_) {
+                    QString problem;
+                    networkOnline_ = runNetworkOperation([&] { return lan_->push(problem); }, "Sharing workspace changes…");
+                    lastNetworkError_ = problem;
+                    queued = !networkOnline_;
                 }
             }
         }
         if (currentUser_) updateNotificationButton();
-        if (!successMessage.isEmpty()) showStatus(successMessage);
+        updateConnectionUi();
+        if (queued) showStatus("Saved on this computer · waiting to synchronize. Open Transfers & sync for details.");
+        else if (!successMessage.isEmpty()) showStatus(successMessage);
         return true;
     } catch (const std::exception& error) {
         showStatus(q(error.what()), false);
@@ -649,15 +879,17 @@ bool TeamSyncGui::perform(const std::function<void()>& action, const QString& su
 }
 
 bool TeamSyncGui::pullNetworkChanges(const bool showError) {
+    if (networkBusy_) return false;
     if (lan_->mode() != LanSyncManager::Mode::Client) return true;
     bool changed = false;
-    QString networkError;
-    if (!lan_->pull(changed, networkError)) {
+    QString problem;
+    if (!runNetworkOperation([&] { return lan_->sync(changed, problem); }, "Synchronizing workspace…")) {
         networkOnline_ = false;
-        lastNetworkError_ = networkError;
+        lastNetworkError_ = problem;
         updateConnectionUi();
-        showStatus("Network sync paused: " + networkError, false);
-        if (showError) QMessageBox::warning(this, "TeamSync network", networkError);
+        showStatus("Changes remain safe on this computer. Sync paused: " + problem, false);
+        if (showError) QMessageBox::warning(this, "Synchronization paused",
+            problem + "\n\nLocal edits are preserved. Use Retry or resolve the conflict from Transfers & sync.");
         return false;
     }
     networkOnline_ = true;
@@ -665,14 +897,20 @@ bool TeamSyncGui::pullNetworkChanges(const bool showError) {
     if (changed) reloadNetworkData();
     return true;
 }
-
 void TeamSyncGui::reloadNetworkData() {
     const int userId = currentUser_ ? currentUser_->id() : 0;
-    service_->reload();
-    currentUser_ = nullptr;
-    if (userId > 0) {
-        try { currentUser_ = &service_->user(userId); } catch (...) {}
-    }
+    const auto username = currentUser_ ? currentUser_->username() : std::string{};
+    lan_->executeLocalMutation([&] {
+        currentUser_ = nullptr;
+        service_->reload();
+        if (userId > 0) {
+            try {
+                auto& candidate = service_->user(userId);
+                if (candidate.username() == username && candidate.passwordHash() == util::hashPassword(s(sessionPassword_), username))
+                    currentUser_ = &candidate;
+            } catch (...) {}
+        }
+    });
     if (networkStatus_) networkStatus_->setText("Connection: " + lan_->statusText());
     updateConnectionUi();
     if (currentUser_) {
@@ -682,6 +920,14 @@ void TeamSyncGui::reloadNetworkData() {
         if (chatDialog_ && chatDialog_->isVisible()) refreshChat();
         if (notificationsDialog_ && notificationsDialog_->isVisible()) refreshNotifications();
         showStatus("New changes received from the shared workspace");
+    } else if (userId > 0) {
+        if (chatDialog_) chatDialog_->hide();
+        if (notificationsDialog_) notificationsDialog_->hide();
+        guestSession_ = false;
+        sessionPassword_.clear();
+        signedInUser_->setText("Not signed in");
+        rootStack_->setCurrentWidget(authPage_);
+        showStatus("Your account is no longer available in this workspace. Sign in again.", false);
     }
 }
 
@@ -691,30 +937,33 @@ std::filesystem::path TeamSyncGui::joinedCacheRoot(const QString& address, const
 }
 
 void TeamSyncGui::configureLanCallbacks() {
-    lan_->setRemoteCommitHandler([this] {
-        reloadNetworkData();
-        updateConnectionUi();
-        showStatus("A connected computer synchronized new changes");
+    const QPointer<TeamSyncGui> owner(this);
+    const auto expectedRoot = activeRoot_;
+    lan_->setRemoteCommitHandler([owner, expectedRoot] {
+        if (!owner) return;
+        QMetaObject::invokeMethod(owner, [owner, expectedRoot] {
+            if (owner && owner->activeRoot_ == expectedRoot) owner->remoteReloadPending_ = true;
+        }, Qt::QueuedConnection);
     });
 }
 
 void TeamSyncGui::startHostingDialog() {
-    if (currentUser_) {
-        QMessageBox::information(this, "Connection mode", "Sign out before changing the workspace connection.");
+    if (networkBusy_) return;
+    if (lan_->mode() == LanSyncManager::Mode::Host) {
+        showConnectionToast("Already hosting · Pairing code " + lan_->pairingCode());
         return;
     }
+    if (lan_->mode() == LanSyncManager::Mode::Client) {
+        switchToLocalWorkspace();
+        if (lan_->mode() != LanSyncManager::Mode::Local) return;
+    }
     QDialog dialog(this);
+    dialog.setObjectName("hostDialog");
     dialog.setWindowTitle("Host this workspace");
     dialog.setMinimumWidth(480);
     auto* layout = new QVBoxLayout(&dialog);
     layout->addWidget(mutedLabel("Other computers on the same Wi-Fi or hotspot will join this computer. Keep TeamSync open while collaborating."));
-    auto* form = new QFormLayout;
-    auto* port = new QSpinBox;
-    port->setObjectName("hostPortSpin");
-    port->setRange(1024, 65535);
-    port->setValue(45454);
-    form->addRow("Network port", port);
-    layout->addLayout(form);
+    layout->addWidget(mutedLabel("No IP address or port is needed. Other TeamSync computers can find this workspace automatically and enter the six-digit code shown after hosting starts."));
     layout->addWidget(mutedLabel("Windows Firewall may ask for permission. Allow Private networks only."));
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok);
     buttons->button(QDialogButtonBox::Ok)->setText("Start hosting");
@@ -732,7 +981,7 @@ void TeamSyncGui::startHostingDialog() {
         service_ = std::make_unique<TeamSyncService>(activeRoot_);
     }
     QString error;
-    if (!lan_->startHost(static_cast<quint16>(port->value()), error, networkOptions_.pairingCode)) {
+    if (!lan_->startHost(45454, error, networkOptions_.pairingCode)) {
         QMessageBox::critical(this, "Could not host workspace", error);
         showConnectionToast("Hosting could not start", false);
         return;
@@ -740,22 +989,29 @@ void TeamSyncGui::startHostingDialog() {
     configureLanCallbacks();
     networkOnline_ = true;
     lastNetworkError_.clear();
-    loginUsername_->clear();
-    loginPassword_->clear();
+    if (!currentUser_) {
+        loginUsername_->clear();
+        loginPassword_->clear();
+    }
     updateConnectionUi();
-    showConnectionToast("Workspace is now available on your local network");
+    showConnectionToast("Hosting workspace · Pairing code " + lan_->pairingCode());
 }
 
 void TeamSyncGui::showJoinWorkspaceDialog() {
-    if (currentUser_) {
-        QMessageBox::information(this, "Connection mode", "Sign out before changing the workspace connection.");
-        return;
-    }
+    if (networkBusy_) return;
     QDialog dialog(this);
+    dialog.setObjectName("joinDialog");
     dialog.setWindowTitle("Join a TeamSync workspace");
-    dialog.setMinimumWidth(500);
+    dialog.setMinimumWidth(540);
     auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(mutedLabel("Enter the details shown on the host computer. Both computers must be on the same Wi-Fi or hotspot."));
+    layout->addWidget(mutedLabel("Find a nearby workspace, select it, and enter the six-digit code shown by its host. Use the same Wi-Fi or hotspot and the updated TeamSync version on every computer. GUI and console users can join each other."));
+    auto* nearby = new QListWidget;
+    nearby->setObjectName("nearbyWorkspaces");
+    nearby->setMinimumHeight(130);
+    nearby->addItem("Press Find nearby workspaces to search your network.");
+    layout->addWidget(nearby);
+    auto* find = button("Find nearby workspaces", true);
+    layout->addWidget(find);
     auto* form = new QFormLayout;
     auto* address = new QLineEdit;
     address->setObjectName("joinHostAddress");
@@ -768,40 +1024,89 @@ void TeamSyncGui::showJoinWorkspaceDialog() {
     code->setObjectName("joinPairingCode");
     code->setPlaceholderText("Six-digit pairing code");
     code->setMaxLength(6);
-    form->addRow("Host IPv4 address", address);
-    form->addRow("Network port", port);
     form->addRow("Pairing code", code);
+    auto* advanced = new QCheckBox("Enter connection details manually instead");
+    advanced->setObjectName("joinManualConnection");
+    layout->addWidget(advanced);
+    auto* manual = new QWidget;
+    auto* manualForm = new QFormLayout(manual);
+    manualForm->setContentsMargins(0, 0, 0, 0);
+    manualForm->addRow("Host address", address);
+    manualForm->addRow("Network port", port);
+    manual->setVisible(false);
+    layout->addWidget(manual);
     layout->addLayout(form);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok);
     buttons->button(QDialogButtonBox::Ok)->setText("Connect");
     buttons->button(QDialogButtonBox::Ok)->setProperty("primary", true);
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(advanced, &QCheckBox::toggled, manual, &QWidget::setVisible);
+    connect(find, &QPushButton::clicked, &dialog, [this, nearby, find] {
+        find->setEnabled(false);
+        nearby->clear();
+        QList<LanSyncManager::NearbyWorkspace> workspaces;
+        runNetworkOperation([&] { workspaces = LanSyncManager::discoverNearby(); return true; }, "Looking for nearby workspaces…");
+        for (const auto& workspace : workspaces) {
+            auto* item = new QListWidgetItem(workspace.name + "  •  Ready to join");
+            item->setData(Qt::UserRole, workspace.address);
+            item->setData(Qt::UserRole + 1, workspace.port);
+            nearby->addItem(item);
+        }
+        if (workspaces.isEmpty()) nearby->addItem("No workspace found. Check Wi-Fi/hotspot and host status, then try again.");
+        else nearby->setCurrentRow(0);
+        find->setEnabled(true);
+    });
     connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-        if (address->text().trimmed().isEmpty() || code->text().size() != 6) {
-            QMessageBox::warning(&dialog, "Connection details", "Enter the host IPv4 address and six-digit pairing code.");
+        QString selectedAddress = address->text().trimmed();
+        quint16 selectedPort = static_cast<quint16>(port->value());
+        if (!advanced->isChecked() && nearby->currentItem()) {
+            selectedAddress = nearby->currentItem()->data(Qt::UserRole).toString();
+            selectedPort = static_cast<quint16>(nearby->currentItem()->data(Qt::UserRole + 1).toUInt());
+        }
+        if (selectedAddress.isEmpty() || code->text().size() != 6) {
+            QMessageBox::warning(&dialog, "Connection details", "Select a nearby workspace and enter its six-digit code. Use manual details only if discovery cannot find it.");
             return;
         }
-        const auto cacheRoot = joinedCacheRoot(address->text(), static_cast<quint16>(port->value()));
+        const auto cacheRoot = joinedCacheRoot(selectedAddress, selectedPort);
         auto candidate = std::make_unique<LanSyncManager>(cacheRoot);
         QString error;
-        QApplication::setOverrideCursor(Qt::WaitCursor);
-        const bool connected = candidate->joinHost(address->text(), static_cast<quint16>(port->value()),
-                                                   code->text(), error);
-        QApplication::restoreOverrideCursor();
+        const QString pairingCode = code->text();
+        const bool connected = runNetworkOperation([&] {
+            return candidate->joinHost(selectedAddress, selectedPort, pairingCode, error);
+        }, "Connecting and receiving workspace…", candidate.get());
         if (!connected) {
             QMessageBox::critical(&dialog, "Could not connect", error);
             return;
         }
+        const QString previousUsername = currentUser_ ? q(currentUser_->username()) : QString();
+        const QString previousPassword = sessionPassword_;
+        if (chatDialog_) chatDialog_->hide();
+        if (notificationsDialog_) notificationsDialog_->hide();
+        currentUser_ = nullptr;
         activeRoot_ = cacheRoot;
         service_ = std::make_unique<TeamSyncService>(activeRoot_);
         lan_ = std::move(candidate);
+        if (!previousUsername.isEmpty()) {
+            try {
+                currentUser_ = &service_->login(s(previousUsername), s(previousPassword));
+            } catch (const std::exception&) {
+                currentUser_ = nullptr;
+                sessionPassword_.clear();
+                guestSession_ = false;
+                rootStack_->setCurrentWidget(authPage_);
+                QMessageBox::information(&dialog, "Sign in required", "This shared workspace does not have a matching account. Please sign in or create an account there.");
+            }
+        }
         configureLanCallbacks();
         networkOnline_ = true;
         lastNetworkError_.clear();
-        loginUsername_->clear();
-        loginPassword_->clear();
+        if (!currentUser_) {
+            loginUsername_->clear();
+            loginPassword_->clear();
+        }
         updateConnectionUi();
+        if (currentUser_) refreshSessionUi();
         dialog.accept();
     });
     if (dialog.exec() == QDialog::Accepted) {
@@ -810,24 +1115,38 @@ void TeamSyncGui::showJoinWorkspaceDialog() {
 }
 
 void TeamSyncGui::switchToLocalWorkspace() {
-    if (currentUser_) {
-        QMessageBox::information(this, "Connection mode", "Sign out before changing the workspace connection.");
-        return;
-    }
+    if (networkBusy_) return;
     if (lan_->mode() == LanSyncManager::Mode::Local && activeRoot_ == localRoot_) {
         showConnectionToast("Already using the local workspace");
         return;
     }
     if (QMessageBox::question(this, "Use local workspace",
-            "Disconnect from the shared workspace and return to this computer's local data?") != QMessageBox::Yes) return;
+            "Disconnect from sharing and return to this computer's local data?") != QMessageBox::Yes) return;
+    const QString username = currentUser_ ? q(currentUser_->username()) : QString();
+    const QString password = sessionPassword_;
+    if (chatDialog_) chatDialog_->hide();
+    if (notificationsDialog_) notificationsDialog_->hide();
+    currentUser_ = nullptr;
     lan_ = std::make_unique<LanSyncManager>(localRoot_);
     activeRoot_ = localRoot_;
     service_ = std::make_unique<TeamSyncService>(activeRoot_);
+    if (!username.isEmpty()) {
+        try { currentUser_ = &service_->login(s(username), s(password)); }
+        catch (const std::exception&) {}
+    }
     configureLanCallbacks();
     networkOnline_ = true;
     lastNetworkError_.clear();
-    loginUsername_->clear();
-    loginPassword_->clear();
+    if (currentUser_) refreshSessionUi();
+    else {
+        guestSession_ = false;
+        sessionPassword_.clear();
+        signedInUser_->setText("Not signed in");
+        rootStack_->setCurrentWidget(authPage_);
+        loginUsername_->setText(username);
+        loginPassword_->clear();
+        attemptRememberedLogin();
+    }
     updateConnectionUi();
     showConnectionToast("Using this computer's local workspace");
 }
@@ -837,12 +1156,25 @@ void TeamSyncGui::refreshConnection() {
 }
 
 void TeamSyncGui::updateConnectionUi() {
+    if (networkBusy_) return;
     const auto mode = lan_->mode();
+    for (const auto& name : {"localConnectionButton", "hostConnectionButton", "joinConnectionButton"}) {
+        if (auto* control = findChild<QPushButton*>(name)) {
+            const bool selected = QString(name) == "localConnectionButton" ? mode == LanSyncManager::Mode::Local :
+                QString(name) == "hostConnectionButton" ? mode == LanSyncManager::Mode::Host : mode == LanSyncManager::Mode::Client;
+            control->setChecked(selected);
+        }
+    }
+    if (connectionBadge_) {
+        connectionBadge_->setText(mode == LanSyncManager::Mode::Host ? "Hosting" :
+            mode == LanSyncManager::Mode::Client ? (networkOnline_ ? "Connected" : "Offline") : "Local");
+    }
     if (networkStatus_) {
-        if (mode == LanSyncManager::Mode::Host) networkStatus_->setText(lan_->statusText());
-        else if (mode == LanSyncManager::Mode::Client && networkOnline_) networkStatus_->setText("Connected to " + lan_->hostAddress());
-        else if (mode == LanSyncManager::Mode::Client) networkStatus_->setText("Connection interrupted • " + lan_->hostAddress());
-        else networkStatus_->setText("Local workspace • This computer only");
+        networkStatus_->setToolTip(lan_->statusText());
+        if (mode == LanSyncManager::Mode::Host) networkStatus_->setText("Hosting · Pairing code " + lan_->pairingCode());
+        else if (mode == LanSyncManager::Mode::Client && networkOnline_) networkStatus_->setText("Connected to a shared workspace");
+        else if (mode == LanSyncManager::Mode::Client) networkStatus_->setText("Connection interrupted · Open Connection for details");
+        else networkStatus_->setText("Use a local workspace on this computer");
     }
     if (!connectionModeLabel_) return;
 
@@ -865,6 +1197,8 @@ void TeamSyncGui::updateConnectionUi() {
     }
     connectionRevisionLabel_->setText("Sync state: " + lan_->lastSyncText() +
                                       "  •  Revision " + QString::number(lan_->revision()));
+    if (lan_->mode() == LanSyncManager::Mode::Client && lan_->hasPendingChanges())
+        connectionRevisionLabel_->setText(connectionRevisionLabel_->text() + "  •  Local changes waiting to sync");
     connectionPeersList_->clear();
     if (mode == LanSyncManager::Mode::Host) {
         const auto peers = lan_->activePeerAddresses();
@@ -883,21 +1217,21 @@ void TeamSyncGui::updateConnectionUi() {
 
 void TeamSyncGui::showConnectionToast(const QString& message, const bool success) {
     auto* toast = new QDialog(this, Qt::Tool | Qt::FramelessWindowHint);
+    toast->setObjectName("connectionToast");
+    toast->setProperty("tone", success ? "success" : "danger");
     toast->setAttribute(Qt::WA_DeleteOnClose);
     toast->setAttribute(Qt::WA_ShowWithoutActivating);
     auto* layout = new QHBoxLayout(toast);
-    layout->setContentsMargins(18, 14, 18, 14);
-    auto* label = new QLabel((success ? "✓  " : "!  ") + message);
-    label->setStyleSheet("font-weight:700; color:white;");
+    layout->setContentsMargins(16, 12, 16, 12);
+    auto* label = new QLabel(message);
+    label->setWordWrap(true);
+    label->setMaximumWidth(420);
     layout->addWidget(label);
-    toast->setStyleSheet(success
-        ? "QDialog{background:#176b57; border:1px solid #48d5ae; border-radius:12px;}"
-        : "QDialog{background:#7a2738; border:1px solid #ff8194; border-radius:12px;}");
     toast->adjustSize();
     const QPoint topRight = mapToGlobal(rect().topRight());
-    toast->move(topRight.x() - toast->width() - 28, topRight.y() + 28);
+    toast->move(topRight.x() - toast->width() - 20, topRight.y() + 20);
     toast->show();
-    QTimer::singleShot(2600, toast, &QDialog::close);
+    QTimer::singleShot(2800, toast, &QDialog::close);
 }
 
 int TeamSyncGui::currentUserId() const {
@@ -915,329 +1249,339 @@ int TeamSyncGui::selectedId(QTableWidget* source) const {
 }
 
 void TeamSyncGui::showStatus(const QString& message, const bool success) {
-    statusBar()->setStyleSheet(success ? "QStatusBar{color:#7ce7c4;}" : "QStatusBar{color:#ff9aa6;}");
+    statusBar()->setProperty("tone", success ? "normal" : "danger");
+    statusBar()->style()->unpolish(statusBar());
+    statusBar()->style()->polish(statusBar());
     statusBar()->showMessage(message, 5000);
 }
 
 void TeamSyncGui::applyTheme(const bool dark) {
     darkTheme_ = dark;
-    struct Colors {
-        QString window, surface, surfaceHigh, surfaceHighest, outline, text, muted;
-        QString primary, onPrimary, primaryContainer, onPrimaryContainer;
-        QString secondaryContainer, onSecondaryContainer, errorContainer, onErrorContainer;
-        QString brandA, brandB, shadow;
-    } colors;
-    if (dark) {
-        colors = {"#111318", "#1B1B1F", "#242329", "#2B2930", "#49454F",
-                  "#E6E1E5", "#CAC4D0", "#D0BCFF", "#381E72", "#4F378B",
-                  "#EADDFF", "#4A4458", "#E8DEF8", "#633B48", "#FFD8E4",
-                  "#4F378B", "#006874", "rgba(0,0,0,150)"};
-    } else {
-        colors = {"#FFFBFE", "#FFFFFF", "#F7F2FA", "#EDE7F0", "#CAC4D0",
-                  "#1D1B20", "#625B71", "#6750A4", "#FFFFFF", "#EADDFF",
-                  "#21005D", "#E8DEF8", "#1D192B", "#FFD8E4", "#410E0B",
-                  "#6750A4", "#006874", "rgba(45,35,55,55)"};
+    qApp->setProperty("darkTheme", dark);
+    qApp->setProperty("animationsEnabled", popupAnimations_);
+    ThemeManager::apply(this, dark);
+    for (auto* control : findChildren<QPushButton*>()) {
+        const QString name = control->property("iconName").toString();
+        if (!name.isEmpty()) control->setIcon(ThemeManager::icon(name, dark,
+            control->objectName() == "navButton" && control->isChecked(), control->property("primary").toBool()));
     }
-
-    QString style = R"QSS(
-        * { font-family:"Segoe UI Variable Text","Segoe UI"; font-size:10pt; }
-        QMainWindow, QWidget { background:@WINDOW@; color:@TEXT@; }
-        QLabel { background:transparent; }
-        #authPage { background:@WINDOW@; }
-        #brandPanel {
-            background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 @BRANDA@,stop:0.55 @BRANDB@,stop:1 @PRIMARY@);
-            border:none; border-radius:32px;
-        }
-        #brandTitle { color:white; font-size:36pt; font-weight:800; letter-spacing:-1px; }
-        #brandTagline { color:white; font-size:19pt; font-weight:700; }
-        #brandPanel #mutedLabel { color:white; }
-        #privacyLabel { color:white; font-size:9pt; font-weight:700; letter-spacing:1px; }
-        #featureChip { background:rgba(255,255,255,0.14); border:1px solid rgba(255,255,255,0.22); border-radius:18px; color:white; padding:12px 16px; }
-        #authCard, #card { background:@SURFACE@; border:1px solid @OUTLINE@; border-radius:28px; }
-        #authHeading { color:@TEXT@; font-size:26pt; font-weight:750; letter-spacing:-0.5px; }
-        #shellPage, #pageArea { background:@WINDOW@; }
-        #sidebar { background:@SURFACE@; border:none; border-right:1px solid @OUTLINE@; }
-        #sidebarLogo { color:@TEXT@; font-size:20pt; font-weight:800; }
-        #sidebarUser { background:@SURFACEHIGH@; border:none; border-radius:20px; padding:14px; }
-        #pageHeader { background:@WINDOW@; border:none; }
-        #pageTitle, #dialogHeroTitle { color:@TEXT@; font-size:23pt; font-weight:750; letter-spacing:-0.5px; }
-        #pageSubtitle, #mutedLabel { color:@MUTED@; }
-        #sectionTitle { color:@TEXT@; font-size:15pt; font-weight:720; }
-        #metricValue { color:@TEXT@; font-size:27pt; font-weight:780; }
-        #metricLabel { color:@MUTED@; font-weight:650; }
-        #metricAccent { color:@PRIMARY@; font-size:9pt; font-weight:700; }
-        #emptyState { color:@MUTED@; padding:28px; }
-        #connectionPanel { background:@SURFACEHIGH@; border:none; border-radius:22px; }
-        #connectionPanelTitle { color:@TEXT@; font-weight:700; }
-        #tutorialStep, #materialInset { background:@SURFACEHIGH@; border:none; border-radius:18px; padding:13px 15px; }
-        QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QDateEdit, QSpinBox {
-            background:@SURFACEHIGH@; color:@TEXT@; border:1px solid @OUTLINE@;
-            border-radius:16px; padding:10px 13px; min-height:24px; selection-background-color:@PRIMARY@;
-        }
-        QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QComboBox:hover, QDateEdit:hover, QSpinBox:hover { border-color:@MUTED@; }
-        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QDateEdit:focus, QSpinBox:focus { border:2px solid @PRIMARY@; padding:9px 12px; }
-        QLineEdit[readOnly="true"] { color:@MUTED@; background:@SURFACE@; }
-        QComboBox::drop-down { border:none; width:32px; }
-        QComboBox QAbstractItemView { background:@SURFACEHIGH@; color:@TEXT@; border:1px solid @OUTLINE@; selection-background-color:@PRIMARYCONTAINER@; selection-color:@ONPRIMARYCONTAINER@; }
-        QPushButton {
-            background:@SURFACEHIGH@; color:@TEXT@; border:none; border-radius:20px;
-            padding:9px 17px; min-height:22px; font-weight:650;
-        }
-        QPushButton:hover { background:@SURFACEHIGHEST@; }
-        QPushButton:pressed { background:@SECONDARYCONTAINER@; padding-top:11px; padding-bottom:7px; }
-        QPushButton[primary="true"] { background:@PRIMARY@; color:@ONPRIMARY@; border:none; }
-        QPushButton[primary="true"]:hover { background:@PRIMARYCONTAINER@; color:@ONPRIMARYCONTAINER@; }
-        QPushButton#tonalButton { background:@SECONDARYCONTAINER@; color:@ONSECONDARYCONTAINER@; }
-        QPushButton#linkButton { background:transparent; border:none; color:@PRIMARY@; padding:5px 8px; }
-        QPushButton#linkButton:hover { background:@PRIMARYCONTAINER@; color:@ONPRIMARYCONTAINER@; }
-        QPushButton#themeButton { background:@SURFACEHIGH@; color:@TEXT@; border-radius:20px; min-width:84px; }
-        QPushButton#notificationButton { background:@PRIMARY@; color:@ONPRIMARY@; border-radius:20px; min-width:48px; padding:8px 12px; }
-        QPushButton#notificationButton[hasUnread="true"] { background:@PRIMARY@; color:@ONPRIMARY@; }
-        QPushButton#navButton { background:transparent; color:@MUTED@; border:none; border-radius:24px; text-align:left; padding:12px 16px; font-weight:650; }
-        QPushButton#navButton:hover { background:@SURFACEHIGH@; color:@TEXT@; }
-        QPushButton#navButton:checked { background:@SECONDARYCONTAINER@; color:@ONSECONDARYCONTAINER@; border:none; }
-        QPushButton#dangerButton, QPushButton#logoutButton { color:@ONERRORCONTAINER@; background:@ERRORCONTAINER@; }
-        QPushButton#floatingChatButton { background:@PRIMARY@; border:none; border-radius:29px; padding:0; }
-        QPushButton#floatingChatButton:hover { background:@PRIMARYCONTAINER@; }
-        QTableWidget { background:@SURFACE@; alternate-background-color:@SURFACEHIGH@; border:1px solid @OUTLINE@; border-radius:24px; color:@TEXT@; selection-background-color:@SECONDARYCONTAINER@; selection-color:@ONSECONDARYCONTAINER@; outline:none; }
-        QHeaderView::section { background:@SURFACEHIGH@; color:@MUTED@; border:none; border-bottom:1px solid @OUTLINE@; padding:12px; font-weight:700; }
-        QTableWidget::item { padding:10px; border-bottom:1px solid @OUTLINE@; }
-        QTableWidget::item:hover { background:@SURFACEHIGHEST@; }
-        QListWidget { background:@SURFACE@; border:1px solid @OUTLINE@; border-radius:24px; color:@TEXT@; outline:none; padding:8px; }
-        QListWidget::item { padding:12px; border-radius:16px; margin:3px; }
-        QListWidget::item:hover { background:@SURFACEHIGH@; }
-        QListWidget::item:selected { background:@SECONDARYCONTAINER@; color:@ONSECONDARYCONTAINER@; }
-        QProgressBar { background:@SURFACEHIGH@; border:none; border-radius:8px; text-align:center; color:@TEXT@; min-height:18px; }
-        QProgressBar::chunk { border-radius:8px; background:@PRIMARY@; }
-        QGroupBox { border:1px solid @OUTLINE@; border-radius:22px; margin-top:16px; padding:16px; font-weight:700; }
-        QGroupBox::title { subcontrol-origin:margin; left:16px; padding:0 7px; color:@TEXT@; }
-        QDialog { background:@SURFACE@; }
-        QDialogButtonBox QPushButton { min-width:96px; }
-        QMessageBox { background:@SURFACE@; }
-        QScrollArea, QScrollArea > QWidget > QWidget { background:transparent; border:none; }
-        QScrollBar:vertical { background:transparent; width:11px; margin:3px; }
-        QScrollBar::handle:vertical { background:@OUTLINE@; border-radius:5px; min-height:36px; }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-        QStatusBar { background:@SURFACE@; color:@MUTED@; border:none; }
-        QToolTip { background:@SURFACEHIGHEST@; color:@TEXT@; border:1px solid @OUTLINE@; border-radius:10px; padding:7px; }
-    )QSS";
-    const std::vector<std::pair<QString, QString>> replacements = {
-        {"@WINDOW@", colors.window}, {"@SURFACE@", colors.surface},
-        {"@SURFACEHIGH@", colors.surfaceHigh}, {"@SURFACEHIGHEST@", colors.surfaceHighest},
-        {"@OUTLINE@", colors.outline}, {"@TEXT@", colors.text}, {"@MUTED@", colors.muted},
-        {"@PRIMARY@", colors.primary}, {"@ONPRIMARY@", colors.onPrimary},
-        {"@PRIMARYCONTAINER@", colors.primaryContainer}, {"@ONPRIMARYCONTAINER@", colors.onPrimaryContainer},
-        {"@SECONDARYCONTAINER@", colors.secondaryContainer}, {"@ONSECONDARYCONTAINER@", colors.onSecondaryContainer},
-        {"@ERRORCONTAINER@", colors.errorContainer}, {"@ONERRORCONTAINER@", colors.onErrorContainer},
-        {"@BRANDA@", colors.brandA}, {"@BRANDB@", colors.brandB}, {"@SHADOW@", colors.shadow}
-    };
-    for (const auto& [token, value] : replacements) style.replace(token, value);
-    setStyleSheet(style);
-
-    const QString switchLabel = dark ? "☀  Light" : "☾  Dark";
-    if (authThemeButton_) authThemeButton_->setText(switchLabel);
-    if (shellThemeButton_) shellThemeButton_->setText(switchLabel);
-    const std::array<ushort, 10> navigationGlyphs = {
-        0xE80F, 0xE716, 0xE8B7, 0xE73E, 0xE8A5,
-        0xE9D2, 0xE81C, 0xE968, 0xE897, 0xE77B
-    };
-    for (std::size_t index = 0; index < navigationButtons_.size() && index < navigationGlyphs.size(); ++index) {
-        navigationButtons_[index]->setIcon(materialGlyphIcon(navigationGlyphs[index], QColor(colors.muted)));
-        navigationButtons_[index]->setIconSize(QSize(24, 24));
+    for (auto* input : {loginUsername_, loginPassword_, globalSearch_}) {
+        if (!input || input->actions().isEmpty()) continue;
+        input->actions().first()->setIcon(ThemeManager::icon(input == loginPassword_ ? "lock" : input == loginUsername_ ? "user" : "search", dark));
     }
-    QSettings("TeamSync", "TeamSync").setValue("appearance/darkTheme", darkTheme_);
+    if (auto* reveal = findChild<QAction*>("passwordVisibilityAction"))
+        reveal->setIcon(ThemeManager::icon(loginPassword_->echoMode() == QLineEdit::Password ? "eye" : "eye-off", dark));
+    if (profileChevron_) profileChevron_->setIcon(ThemeManager::icon("chevron-down", dark));
+    if (navigationButtons_.size() > ProfilePage) navigationButtons_[ProfilePage]->update();
+    if (navigationIndicator_) {
+        auto palette = navigationIndicator_->palette();
+        palette.setColor(QPalette::Window, ui::accentColor());
+        navigationIndicator_->setPalette(palette);
+    }
+    for (auto* control : {authThemeButton_, shellThemeButton_}) {
+        if (!control) continue;
+        control->setText("");
+        control->setIcon(ThemeManager::icon(dark ? "sun" : "moon", dark));
+        control->setToolTip(dark ? "Switch to light theme" : "Switch to dark theme");
+        control->setFixedSize(34, 34);
+    }
+    appSettings().setValue("appearance/darkTheme", dark);
 }
 
 void TeamSyncGui::toggleTheme() {
-    applyTheme(!darkTheme_);
-    showStatus(darkTheme_ ? "Dark theme enabled" : "Light theme enabled");
+    const QPixmap previous = centralWidget()->grab();
+    const bool dark = !darkTheme_;
+    appSettings().setValue("appearance/theme", dark ? "dark" : "light");
+    if (themeChoice_) {
+        const QSignalBlocker blocker(themeChoice_);
+        themeChoice_->setCurrentIndex(dark ? 2 : 1);
+    }
+    applyTheme(dark);
+    if (currentUser_) refreshCurrentPage();
+    ui::crossFade(centralWidget(), previous, 250);
+    showStatus(dark ? "Dark theme" : "Light theme");
 }
 
 void TeamSyncGui::animateWindowIn() {
-    setWindowOpacity(0.0);
-    auto* animation = new QPropertyAnimation(this, "windowOpacity", this);
-    animation->setDuration(420);
-    animation->setStartValue(0.0);
-    animation->setEndValue(1.0);
-    animation->setEasingCurve(QEasingCurve::OutCubic);
-    animation->start(QAbstractAnimation::DeleteWhenStopped);
+    setWindowOpacity(1.0);
 }
 
 void TeamSyncGui::animatePage(QWidget* page) {
-    if (!page) return;
-    const QPoint finalPosition = page->pos();
-    page->move(finalPosition + QPoint(18, 0));
-    auto* animation = new QPropertyAnimation(page, "pos", page);
-    animation->setDuration(190);
-    animation->setStartValue(page->pos());
-    animation->setEndValue(finalPosition);
-    animation->setEasingCurve(QEasingCurve::OutCubic);
-    connect(animation, &QPropertyAnimation::finished, page, [page, finalPosition] {
-        page->move(finalPosition);
-    });
-    animation->start(QAbstractAnimation::DeleteWhenStopped);
+    // Layouts own page geometry; moving stacked pages can leave blank content.
+    if (page) page->update();
 }
 
 void TeamSyncGui::animatePopup(QDialog* dialog) {
     if (!dialog) return;
-    const QPoint finalPosition = dialog->pos();
-    dialog->move(finalPosition + QPoint(0, 18));
-    dialog->setWindowOpacity(0.0);
+    dialog->setProperty("manualEntrance", true);
+    dialog->setWindowOpacity(1.0);
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
-    auto* group = new QParallelAnimationGroup(dialog);
-    auto* position = new QPropertyAnimation(dialog, "pos", group);
-    position->setDuration(220);
-    position->setStartValue(dialog->pos());
-    position->setEndValue(finalPosition);
-    position->setEasingCurve(QEasingCurve::OutCubic);
-    auto* opacity = new QPropertyAnimation(dialog, "windowOpacity", group);
-    opacity->setDuration(180);
-    opacity->setStartValue(0.0);
-    opacity->setEndValue(1.0);
-    group->start(QAbstractAnimation::DeleteWhenStopped);
-}
-
-void TeamSyncGui::resizeEvent(QResizeEvent* event) {
-    QMainWindow::resizeEvent(event);
-    if (floatingChatButton_ && floatingChatButton_->parentWidget()) {
-        floatingChatButton_->move(floatingChatButton_->parentWidget()->width() - 88,
-                                  floatingChatButton_->parentWidget()->height() - 88);
-        floatingChatButton_->raise();
-    }
-}
-
-bool TeamSyncGui::eventFilter(QObject* watched, QEvent* event) {
-    if (floatingChatButton_ && watched == floatingChatButton_->parentWidget() &&
-        event->type() == QEvent::Resize) {
-        auto* parent = floatingChatButton_->parentWidget();
-        floatingChatButton_->move(parent->width() - 88, parent->height() - 88);
-        floatingChatButton_->raise();
-    }
-    return QMainWindow::eventFilter(watched, event);
+    if (!ui::motionAllowed()) return;
+    auto* fade = new QPropertyAnimation(dialog, "windowOpacity", dialog);
+    fade->setDuration(190);
+    fade->setStartValue(0.0);
+    fade->setEndValue(1.0);
+    fade->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void TeamSyncGui::navigateTo(const Page page) {
+    if (!currentUser_ || page < 0 || page >= PageCount) return;
+    const bool changing = contentStack_->currentIndex() != page;
+    const QPixmap previous = changing && contentStack_->isVisible() ? contentStack_->grab() : QPixmap();
     static const QStringList titles = {
         "Overview", "Teams", "Projects", "Tasks", "Shared files",
-        "Reports", "Activity", "Connection", "Tutorial & Credits", "My profile"
+        "Reports", "Activity", "Connection", "Tutorial & Credits", "My profile", "Settings"
     };
     static const QStringList subtitles = {
         "Your workspace at a glance", "People, roles, and team membership",
-        "Track outcomes from start to finish", "Priorities, ownership, and clear status",
+        "Manage your team's projects", "View and manage your tasks",
         "Local files synchronized with your team", "Readable summaries for decisions and reviews",
         "A transparent history of workspace actions", "Live LAN sync and connected computers",
         "Learn the workflow and meet the project team",
-        "Your identity, skills, and security"
+        "Your identity, skills, and security", "Appearance and sign-in preferences"
     };
     contentStack_->setCurrentIndex(page);
     pageTitle_->setText(titles[page]);
     pageSubtitle_->setText(subtitles[page]);
-    if (page < static_cast<int>(navigationButtons_.size())) navigationButtons_[page]->setChecked(true);
+    const bool workPage = page == ProjectsPage || page == TasksPage;
+    globalSearch_->setVisible(!workPage);
+    pageHeaderAction_->setVisible(workPage);
+    pageHeaderAction_->setText(page == TasksPage ? "New task" : "New project");
+    for (int index = 0; index < static_cast<int>(navigationButtons_.size()); ++index) {
+        auto* control = navigationButtons_[index];
+        control->setChecked(index == page);
+        const auto icon = control->property("iconName").toString();
+        if (!icon.isEmpty()) control->setIcon(ThemeManager::icon(icon, darkTheme_, index == page));
+    }
+    if (navigationIndicator_) {
+        navigationIndicator_->setVisible(page < 8);
+        if (page < 8) {
+            auto* selected = navigationButtons_[page];
+            const QPoint position = selected->mapTo(navigationIndicator_->parentWidget(), QPoint(0, 0));
+            const QRect target(position.x() + 1, position.y() + 8, 3, selected->height() - 16);
+            if (navigationIndicator_->width() != 3 || !ui::motionAllowed()) navigationIndicator_->setGeometry(target);
+            else {
+                auto* slide = new QPropertyAnimation(navigationIndicator_, "geometry", navigationIndicator_);
+                slide->setDuration(180); slide->setStartValue(navigationIndicator_->geometry()); slide->setEndValue(target);
+                slide->setEasingCurve(QEasingCurve::OutCubic); slide->start(QAbstractAnimation::DeleteWhenStopped);
+            }
+            navigationIndicator_->raise();
+        }
+    }
     refreshCurrentPage();
-    animatePage(contentStack_->currentWidget());
+    if (changing) ui::crossFade(contentStack_, previous, 200);
+}
+
+void TeamSyncGui::showGlobalSearch() {
+    if (!currentUser_ || networkBusy_) return;
+    const QString query = globalSearch_->text().trimmed();
+    if (query.isEmpty()) return;
+    QDialog dialog(this);
+    dialog.setObjectName("globalSearchDialog");
+    dialog.setWindowTitle("Search workspace");
+    dialog.resize(760, 470);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(20, 20, 20, 20);
+    auto* heading = new QLabel("Results for “" + query + "”");
+    heading->setTextFormat(Qt::PlainText);
+    heading->setObjectName("sectionHeader");
+    layout->addWidget(heading);
+    auto* results = table({"Type", "Name", "Location"});
+    results->setObjectName("globalSearchResults");
+    results->setProperty("emptyText", "No matching items in your teams. Try another search.");
+    results->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    layout->addWidget(results, 1);
+    auto add = [&](const QString& type, const QString& name, const QString& location, int id) {
+        const int row = results->rowCount(); results->insertRow(row);
+        auto* value = new QTableWidgetItem(type);
+        value->setData(Qt::UserRole, id);
+        results->setItem(row, 0, value);
+        results->setItem(row, 1, new QTableWidgetItem(name));
+        results->setItem(row, 2, new QTableWidgetItem(location));
+    };
+    if (!perform([&] {
+        for (const auto* task : service_->searchTasks(currentUserId(), s(query)))
+            add("Task", q(task->title()), q(service_->project(task->projectId()).title()), task->id());
+        for (const auto* project : service_->searchProjects(currentUserId(), s(query)))
+            add("Project", q(project->title()), q(service_->team(project->teamId()).name()), project->id());
+        for (const auto* team : service_->teamsForUser(currentUserId())) {
+            if (q(team->name()).contains(query, Qt::CaseInsensitive)) add("Team", q(team->name()), "Workspace", team->id());
+            for (const auto* file : service_->filesForTeam(currentUserId(), team->id(), s(query)))
+                add("File", q(file->fileName()), q(team->name()), file->id());
+        }
+    })) return;
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Open | QDialogButtonBox::Close);
+    layout->addWidget(buttons);
+    buttons->button(QDialogButtonBox::Open)->setEnabled(results->rowCount() > 0);
+    if (results->rowCount() > 0) results->selectRow(0);
+    auto open = [&] {
+        const int row = results->currentRow();
+        if (row < 0) return;
+        const QString kind = results->item(row, 0)->text();
+        const int id = results->item(row, 0)->data(Qt::UserRole).toInt();
+        QTableWidget* target = nullptr;
+        if (kind == "Task") {
+            if (auto* all = findChild<QPushButton*>("taskScope0")) all->click();
+            taskSearch_->clear(); taskFilter_->setCurrentIndex(0); navigateTo(TasksPage); target = tasksTable_;
+        } else if (kind == "Project") {
+            if (auto* all = findChild<QPushButton*>("projectFilter0")) all->click();
+            projectSearch_->clear(); navigateTo(ProjectsPage); target = projectsTable_;
+        } else if (kind == "Team") { teamSearch_->clear(); navigateTo(TeamsPage); target = teamsTable_; }
+        else if (kind == "File") {
+            const auto& file = service_->sharedFile(id);
+            navigateTo(FilesPage);
+            filesTeam_->setCurrentIndex(filesTeam_->findData(file.teamId()));
+            refreshFiles(); target = filesTable_;
+        }
+        if (target) for (int item = 0; item < target->rowCount(); ++item)
+            if (target->item(item, 0)->data(Qt::UserRole).toInt() == id) target->selectRow(item);
+        dialog.accept();
+    };
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, open);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(results, &QTableWidget::itemDoubleClicked, &dialog, [&](QTableWidgetItem*) { open(); });
+    dialog.exec();
 }
 
 QWidget* TeamSyncGui::buildDashboardPage() {
     auto* scroll = new QScrollArea;
+    scroll->setObjectName("overviewPage");
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
-    auto* content = new QWidget;
-    auto* layout = new QVBoxLayout(content);
-    layout->setContentsMargins(30, 26, 30, 30);
-    layout->setSpacing(20);
-
-    auto* welcome = new QLabel("Today in your workspace");
-    welcome->setObjectName("sectionTitle");
-    layout->addWidget(welcome);
-
-    auto* metricGrid = new QGridLayout;
-    metricGrid->setSpacing(14);
-    const QStringList names = {"My teams", "Projects", "Pending tasks", "In progress", "Completed", "Unread notices"};
-    const QStringList accents = {"COLLABORATION", "ACTIVE WORK", "NEEDS ACTION", "MOVING FORWARD", "DONE", "UPDATES"};
-    for (int index = 0; index < names.size(); ++index) {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(20, 4, 20, 12);
+    layout->setSpacing(16);
+    dashboardMetrics_ = new QWidget;
+    auto* metrics = new QHBoxLayout(dashboardMetrics_);
+    metrics->setContentsMargins(0, 0, 0, 0);
+    metrics->setSpacing(12);
+    const QStringList names = {"Active projects", "My tasks", "Completed tasks", "Team members"};
+    const QStringList symbols = {"folder", "tasks", "check", "teams"};
+    const QStringList tones = {"blue", "blue", "green", "purple"};
+    for (int i = 0; i < 4; ++i) {
         auto* metric = card();
-        auto* metricLayout = new QVBoxLayout(metric);
-        metricLayout->setContentsMargins(18, 17, 18, 17);
-        auto* accent = new QLabel(accents[index]);
-        accent->setObjectName("metricAccent");
+        metric->setObjectName("metricCard");
+        metric->setMinimumHeight(116);
+        auto* row = new QHBoxLayout(metric);
+        row->setContentsMargins(16, 14, 12, 14);
+        row->setSpacing(14);
+        row->addWidget(new ui::IconTile(symbols[i], tones[i], 48));
+        auto* text = new QVBoxLayout;
+        text->setSpacing(4);
         auto* value = new QLabel("0");
         value->setObjectName("metricValue");
-        auto* name = new QLabel(names[index]);
-        name->setObjectName("metricLabel");
-        metricLayout->addWidget(accent);
-        metricLayout->addWidget(value);
-        metricLayout->addWidget(name);
+        auto* label = new QLabel(names[i]);
+        label->setObjectName("metricLabel");
+        label->setWordWrap(true);
+        auto* trend = new QLabel;
+        trend->setObjectName("metricTrend");
+        trend->setProperty("tone", i == 1 ? "amber" : "green");
+        text->addWidget(value);
+        text->addWidget(label);
+        text->addWidget(trend);
         dashboardValues_.push_back(value);
-        metricGrid->addWidget(metric, index / 3, index % 3);
+        dashboardTrends_.push_back(trend);
+        row->addLayout(text, 1);
+        metrics->addWidget(metric, 1);
     }
-    layout->addLayout(metricGrid);
-
-    auto* statusCard = card();
-    auto* statusLayout = new QVBoxLayout(statusCard);
-    statusLayout->setContentsMargins(20, 18, 20, 18);
-    auto* statusTitle = new QLabel("Your task status");
-    statusTitle->setObjectName("sectionTitle");
-    dashboardStatusSummary_ = new QLabel("No assigned tasks yet");
-    dashboardStatusSummary_->setObjectName("metricLabel");
-    statusLayout->addWidget(statusTitle);
-    statusLayout->addWidget(mutedLabel("Task states update from Pending to In Progress to Completed—no percentage entry required."));
-    statusLayout->addWidget(dashboardStatusSummary_);
-    layout->addWidget(statusCard);
-
-    auto* activityGrid = new QGridLayout;
-    activityGrid->setSpacing(16);
-    auto* messagesCard = card();
-    auto* messagesLayout = new QVBoxLayout(messagesCard);
-    auto* messageTitle = new QLabel("Recent conversations");
-    messageTitle->setObjectName("sectionTitle");
-    recentMessages_ = new QListWidget;
-    recentMessages_->setMinimumHeight(190);
-    messagesLayout->addWidget(messageTitle);
-    messagesLayout->addWidget(recentMessages_);
-    auto* activityCard = card();
-    auto* activityLayout = new QVBoxLayout(activityCard);
-    auto* activityTitle = new QLabel("Recent activity");
-    activityTitle->setObjectName("sectionTitle");
-    recentActivities_ = new QListWidget;
-    recentActivities_->setMinimumHeight(190);
-    activityLayout->addWidget(activityTitle);
-    activityLayout->addWidget(recentActivities_);
-    activityGrid->addWidget(messagesCard, 0, 0);
-    activityGrid->addWidget(activityCard, 0, 1);
-    layout->addLayout(activityGrid);
-
-    auto* quickCard = card();
-    auto* quickLayout = new QHBoxLayout(quickCard);
-    quickLayout->setContentsMargins(18, 16, 18, 16);
-    auto* quickText = new QVBoxLayout;
-    auto* quickTitle = new QLabel("Quick actions");
-    quickTitle->setObjectName("sectionTitle");
-    quickText->addWidget(quickTitle);
-    quickText->addWidget(mutedLabel("Jump directly to the work you want to manage."));
-    quickLayout->addLayout(quickText);
-    quickLayout->addStretch();
-    auto* teams = button("Manage teams");
-    auto* tasks = button("Open tasks", true);
-    auto* chat = button("Team chat");
-    quickLayout->addWidget(teams);
-    quickLayout->addWidget(tasks);
-    quickLayout->addWidget(chat);
-    connect(teams, &QPushButton::clicked, this, [this] { navigateTo(TeamsPage); });
-    connect(tasks, &QPushButton::clicked, this, [this] { navigateTo(TasksPage); });
-    connect(chat, &QPushButton::clicked, this, [this] { showChatPanel(); });
-    layout->addWidget(quickCard);
+    layout->addWidget(dashboardMetrics_);
+    dashboardEmpty_ = mutedLabel("");
+    dashboardEmpty_->setObjectName("overviewEmptyState");
+    layout->addWidget(dashboardEmpty_);
+    dashboardEmpty_->hide();
+    dashboardWork_ = new QWidget;
+    auto* columns = new QHBoxLayout(dashboardWork_);
+    columns->setContentsMargins(0, 0, 0, 0);
+    columns->setSpacing(16);
+    auto* left = new QVBoxLayout;
+    auto* right = new QVBoxLayout;
+    left->setSpacing(16);
+    right->setSpacing(16);
+    auto makePanel = [&](const QString& title, Page destination, QVBoxLayout* parent) {
+        auto* panel = card();
+        panel->setObjectName("dashboardPanel");
+        auto* contents = new QVBoxLayout(panel);
+        contents->setContentsMargins(16, 14, 16, 14);
+        contents->setSpacing(12);
+        auto* heading = new QHBoxLayout;
+        auto* name = new QLabel(title);
+        name->setObjectName("sectionHeader");
+        heading->addWidget(name, 1);
+        auto* all = button("View all");
+        all->setObjectName("panelLink");
+        all->setProperty("link", true);
+        heading->addWidget(all);
+        connect(all, &QPushButton::clicked, this, [this, destination] { navigateTo(destination); });
+        contents->addLayout(heading);
+        parent->addWidget(panel);
+        return contents;
+    };
+    auto* taskPanel = makePanel("My tasks", TasksPage, left);
+    myTasksView_ = new QTableView;
+    myTasksView_->setObjectName("overviewMyTasks");
+    myTasksModel_ = new QStandardItemModel(0, 5, myTasksView_);
+    myTasksModel_->setHorizontalHeaderLabels({"Task", "Project", "Priority", "Due date", "Status"});
+    myTasksView_->setModel(myTasksModel_);
+    myTasksView_->setProperty("emptyText", "No tasks assigned yet. Your team's work is in Tasks.");
+    configureTable(myTasksView_);
+    myTasksView_->verticalHeader()->setDefaultSectionSize(38);
+    myTasksView_->setMinimumHeight(220);
+    myTasksView_->setMaximumHeight(220);
+    myTasksView_->horizontalHeader()->setStretchLastSection(false);
+    myTasksView_->horizontalHeader()->setMinimumSectionSize(96);
+    myTasksView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    for (int col = 1; col < 5; ++col) myTasksView_->horizontalHeader()->setSectionResizeMode(col, QHeaderView::Fixed);
+    myTasksView_->setColumnWidth(1, 106);
+    myTasksView_->setColumnWidth(2, 84);
+    myTasksView_->setColumnWidth(3, 106);
+    myTasksView_->setColumnWidth(4, 108);
+    taskPanel->addWidget(myTasksView_);
+    connect(myTasksView_, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
+        const int id = myTasksModel_->item(index.row(), 0)->data(Qt::UserRole).toInt();
+        navigateTo(TasksPage);
+        for (int row = 0; row < tasksTable_->rowCount(); ++row)
+            if (tasksTable_->item(row, 0)->data(Qt::UserRole).toInt() == id) tasksTable_->selectRow(row);
+    });
+    auto* projects = makePanel("Active projects", ProjectsPage, left);
+    projectRows_ = new QVBoxLayout;
+    projectRows_->setContentsMargins(0, 0, 0, 0);
+    projectRows_->setSpacing(0);
+    projects->addLayout(projectRows_);
+    auto* activity = makePanel("Recent activity", ActivityPage, right);
+    activityRows_ = new QVBoxLayout;
+    activityRows_->setSpacing(10);
+    activityRows_->setContentsMargins(0, 0, 0, 0);
+    activity->addLayout(activityRows_);
+    auto* updates = makePanel("Team updates", TeamsPage, right);
+    updateRows_ = new QVBoxLayout;
+    updateRows_->setSpacing(10);
+    updateRows_->setContentsMargins(0, 0, 0, 0);
+    updates->addLayout(updateRows_);
+    auto* updateLink = updates->itemAt(0)->layout();
+    if (updateLink) {
+        if (auto* action = qobject_cast<QPushButton*>(updateLink->itemAt(1)->widget())) {
+            disconnect(action, nullptr, this, nullptr);
+            connect(action, &QPushButton::clicked, this, [this] { showChatPanel(); });
+        }
+    }
+    left->addStretch();
+    right->addStretch();
+    columns->addLayout(left, 64);
+    columns->addLayout(right, 36);
+    layout->addWidget(dashboardWork_);
     layout->addStretch();
-    scroll->setWidget(content);
+    scroll->setWidget(page);
     return scroll;
 }
 
 QWidget* TeamSyncGui::buildTeamsPage() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(30, 26, 30, 30);
-    layout->setSpacing(14);
+    layout->setContentsMargins(24, 20, 24, 20);
+    layout->setSpacing(12);
     auto* toolbar = new QHBoxLayout;
     teamSearch_ = new QLineEdit;
     teamSearch_->setPlaceholderText("Search your teams...");
@@ -1255,6 +1599,10 @@ QWidget* TeamSyncGui::buildTeamsPage() {
     layout->addLayout(toolbar);
     teamsTable_ = table({"ID", "Team", "My role", "Members", "Join code", "Status"});
     teamsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    teamsTable_->setObjectName("teamsTable");
+    teamsTable_->setProperty("emptyText", "No teams yet. Create a team or join with a code.");
+    teamsTable_->setColumnHidden(0, true);
+    requireSelection(teamsTable_, {details, leave});
     layout->addWidget(teamsTable_, 1);
     layout->addWidget(mutedLabel("Team admins can promote or remove members from the member-details window."));
     connect(teamSearch_, &QLineEdit::textChanged, this, [this] { refreshTeams(); });
@@ -1266,93 +1614,13 @@ QWidget* TeamSyncGui::buildTeamsPage() {
     return page;
 }
 
-QWidget* TeamSyncGui::buildProjectsPage() {
-    auto* page = new QWidget;
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(30, 26, 30, 30);
-    layout->setSpacing(14);
-    auto* toolbar = new QHBoxLayout;
-    projectSearch_ = new QLineEdit;
-    projectSearch_->setPlaceholderText("Search projects...");
-    projectSearch_->setClearButtonEnabled(true);
-    auto* create = button("New project", true);
-    auto* edit = button("Edit");
-    auto* archive = button("Archive");
-    toolbar->addWidget(projectSearch_, 1);
-    toolbar->addWidget(create);
-    toolbar->addWidget(edit);
-    toolbar->addWidget(archive);
-    layout->addLayout(toolbar);
-    projectsTable_ = table({"ID", "Project", "Team", "Status", "Start", "Due"});
-    projectsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    layout->addWidget(projectsTable_, 1);
-    connect(projectSearch_, &QLineEdit::textChanged, this, [this] { refreshProjects(); });
-    connect(create, &QPushButton::clicked, this, [this] { showProjectDialog(false); });
-    connect(edit, &QPushButton::clicked, this, [this] { showProjectDialog(true); });
-    connect(archive, &QPushButton::clicked, this, [this] { archiveSelectedProject(); });
-    connect(projectsTable_, &QTableWidget::itemDoubleClicked, this, [this] { showProjectDialog(true); });
-    return page;
-}
 
-QWidget* TeamSyncGui::buildTasksPage() {
-    auto* page = new QWidget;
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(30, 26, 30, 30);
-    layout->setSpacing(12);
-    auto* filters = new QHBoxLayout;
-    taskSearch_ = new QLineEdit;
-    taskSearch_->setPlaceholderText("Search tasks by title or description...");
-    taskSearch_->setClearButtonEnabled(true);
-    taskFilter_ = new QComboBox;
-    taskFilter_->addItems({"All statuses", "Pending", "In progress", "Completed", "Overdue"});
-    auto* create = button("New task", true);
-    auto* edit = button("Edit");
-    filters->addWidget(taskSearch_, 1);
-    filters->addWidget(taskFilter_);
-    filters->addWidget(create);
-    filters->addWidget(edit);
-    layout->addLayout(filters);
-    tasksTable_ = table({"ID", "Task", "Team", "Assignee", "Priority", "Status", "Due", "Skill"});
-    tasksTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    layout->addWidget(tasksTable_, 1);
-    auto* actions = new QHBoxLayout;
-    auto* progress = button("Start task");
-    auto* complete = button("Mark complete");
-    auto* reopen = button("Reopen");
-    auto* evidence = button("Completion details");
-    auto* comments = button("Comments");
-    auto* recommend = button("Recommend member");
-    auto* remove = button("Delete");
-    remove->setObjectName("dangerButton");
-    actions->addWidget(progress);
-    actions->addWidget(complete);
-    actions->addWidget(reopen);
-    actions->addWidget(evidence);
-    actions->addWidget(comments);
-    actions->addWidget(recommend);
-    actions->addStretch();
-    actions->addWidget(remove);
-    layout->addLayout(actions);
-    connect(taskSearch_, &QLineEdit::textChanged, this, [this] { refreshTasks(); });
-    connect(taskFilter_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { refreshTasks(); });
-    connect(create, &QPushButton::clicked, this, [this] { showTaskDialog(false); });
-    connect(edit, &QPushButton::clicked, this, [this] { showTaskDialog(true); });
-    connect(progress, &QPushButton::clicked, this, [this] { startSelectedTask(); });
-    connect(complete, &QPushButton::clicked, this, [this] { completeSelectedTask(); });
-    connect(reopen, &QPushButton::clicked, this, [this] { reopenSelectedTask(); });
-    connect(evidence, &QPushButton::clicked, this, [this] { showCompletionDetails(); });
-    connect(comments, &QPushButton::clicked, this, [this] { showTaskComments(); });
-    connect(recommend, &QPushButton::clicked, this, [this] { showRecommendations(); });
-    connect(remove, &QPushButton::clicked, this, [this] { deleteSelectedTask(); });
-    connect(tasksTable_, &QTableWidget::itemDoubleClicked, this, [this] { showTaskDialog(true); });
-    return page;
-}
 
 QWidget* TeamSyncGui::buildChatPage() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(30, 26, 30, 30);
-    layout->setSpacing(14);
+    layout->setContentsMargins(24, 20, 24, 20);
+    layout->setSpacing(12);
     auto* top = new QVBoxLayout;
     auto* teamRow = new QHBoxLayout;
     teamRow->addWidget(new QLabel("Team"));
@@ -1370,7 +1638,8 @@ QWidget* TeamSyncGui::buildChatPage() {
     top->addLayout(chatActions);
     layout->addLayout(top);
     chatMessages_ = new QListWidget;
-    chatMessages_->setSpacing(4);
+    chatMessages_->setSpacing(2);
+    chatMessages_->setWordWrap(true);
     layout->addWidget(chatMessages_, 1);
     auto* composer = card();
     auto* composerLayout = new QHBoxLayout(composer);
@@ -1391,12 +1660,12 @@ QWidget* TeamSyncGui::buildChatPage() {
 QWidget* TeamSyncGui::buildFilesPage() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(30, 26, 30, 30);
-    layout->setSpacing(14);
+    layout->setContentsMargins(24, 20, 24, 20);
+    layout->setSpacing(12);
     auto* toolbar = new QHBoxLayout;
     toolbar->addWidget(new QLabel("Team"));
     filesTeam_ = new QComboBox;
-    filesTeam_->setMinimumWidth(250);
+    filesTeam_->setMinimumWidth(160);
     auto* share = button("Share local file", true);
     auto* open = button("Open file");
     auto* remove = button("Remove record");
@@ -1409,8 +1678,13 @@ QWidget* TeamSyncGui::buildFilesPage() {
     layout->addLayout(toolbar);
     filesTable_ = table({"ID", "File", "Description", "Uploader", "Shared", "Size", "Available"});
     filesTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    filesTable_->setObjectName("filesTable");
+    filesTable_->setProperty("emptyText", "No shared files. Select a team, then choose Share local file.");
+    filesTable_->setColumnHidden(0, true);
+    requireSelection(filesTable_, {open, remove});
     layout->addWidget(filesTable_, 1);
-    layout->addWidget(mutedLabel("TeamSync copies the file into the workspace so every connected computer receives it."));
+    ui::acceptFileDrops(filesTable_->viewport(), [this](const QStringList& paths) { shareDroppedFiles(paths); });
+    layout->addWidget(mutedLabel("Drop local files here or choose Share local file. Originals stay untouched; changed files transfer in resumable chunks (up to 2 GiB each)."));
     connect(filesTeam_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { refreshFiles(); });
     connect(share, &QPushButton::clicked, this, [this] { shareFile(); });
     connect(open, &QPushButton::clicked, this, [this] { openSelectedFile(); });
@@ -1422,8 +1696,8 @@ QWidget* TeamSyncGui::buildFilesPage() {
 QWidget* TeamSyncGui::buildNotificationsPage() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(30, 26, 30, 30);
-    layout->setSpacing(14);
+    layout->setContentsMargins(24, 20, 24, 20);
+    layout->setSpacing(12);
     auto* top = new QHBoxLayout;
     top->addWidget(mutedLabel("Updates created by team, project, and task activity."));
     top->addStretch();
@@ -1432,6 +1706,7 @@ QWidget* TeamSyncGui::buildNotificationsPage() {
     layout->addLayout(top);
     notificationsTable_ = table({"Status", "Notification", "Date / time"});
     notificationsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    notificationsTable_->setProperty("emptyText", "You are all caught up. Team updates will appear here.");
     layout->addWidget(notificationsTable_, 1);
     connect(markRead, &QPushButton::clicked, this, [this] {
         if (perform([this] { service_->markAllNotificationsRead(currentUserId()); }, "Notifications marked as read")) refreshNotifications();
@@ -1481,8 +1756,8 @@ void TeamSyncGui::showNotificationsPanel() {
 QWidget* TeamSyncGui::buildReportsPage() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(30, 26, 30, 30);
-    layout->setSpacing(14);
+    layout->setContentsMargins(24, 20, 24, 20);
+    layout->setSpacing(12);
     auto* toolbar = new QHBoxLayout;
     reportTeam_ = new QComboBox;
     reportType_ = new QComboBox;
@@ -1494,11 +1769,16 @@ QWidget* TeamSyncGui::buildReportsPage() {
     toolbar->addWidget(reportTeam_);
     toolbar->addWidget(new QLabel("Report"));
     toolbar->addWidget(reportType_);
-    toolbar->addStretch();
-    toolbar->addWidget(generate);
-    toolbar->addWidget(exportButton);
+    toolbar->setStretch(1, 1);
+    toolbar->setStretch(3, 2);
     layout->addLayout(toolbar);
+    auto* actions = new QHBoxLayout;
+    actions->addWidget(generate);
+    actions->addWidget(exportButton);
+    actions->addStretch();
+    layout->addLayout(actions);
     reportPreview_ = new QTextEdit;
+    reportPreview_->setObjectName("reportPreview");
     reportPreview_->setReadOnly(true);
     reportPreview_->setPlaceholderText("Choose a team and report type, then select Generate report.");
     reportPreview_->setFont(QFont("Cascadia Mono", 10));
@@ -1511,8 +1791,8 @@ QWidget* TeamSyncGui::buildReportsPage() {
 QWidget* TeamSyncGui::buildActivityPage() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(30, 26, 30, 30);
-    layout->setSpacing(14);
+    layout->setContentsMargins(24, 20, 24, 20);
+    layout->setSpacing(12);
     auto* toolbar = new QHBoxLayout;
     toolbar->addWidget(new QLabel("Filter by team"));
     activityTeam_ = new QComboBox;
@@ -1524,6 +1804,7 @@ QWidget* TeamSyncGui::buildActivityPage() {
     layout->addLayout(toolbar);
     activityTable_ = table({"Date / time", "Team", "Person", "Action"});
     activityTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    activityTable_->setProperty("emptyText", "No activity for this team yet.");
     layout->addWidget(activityTable_, 1);
     connect(activityTeam_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { refreshActivities(); });
     connect(refresh, &QPushButton::clicked, this, [this] { refreshActivities(); });
@@ -1533,232 +1814,395 @@ QWidget* TeamSyncGui::buildActivityPage() {
 QWidget* TeamSyncGui::buildConnectionPage() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(30, 26, 30, 30);
+    layout->setContentsMargins(24, 20, 24, 20);
     layout->setSpacing(16);
-
+    auto* actions = new QHBoxLayout;
+    auto* host = button("Host this workspace", true);
+    host->setObjectName("shellHostButton");
+    auto* join = button("Join nearby workspace");
+    join->setObjectName("shellJoinButton");
+    auto* local = button("Use local workspace");
+    local->setObjectName("shellLocalButton");
+    iconFor(local, "monitor");
+    actions->addWidget(host);
+    actions->addWidget(join);
+    actions->addWidget(local);
+    actions->addStretch();
+    layout->addLayout(actions);
     auto* summary = card();
-    auto* summaryLayout = new QVBoxLayout(summary);
-    summaryLayout->setContentsMargins(22, 20, 22, 20);
-    auto* heading = new QLabel("Workspace connection");
-    heading->setObjectName("sectionTitle");
+    auto* details = new QVBoxLayout(summary);
+    details->setContentsMargins(20, 16, 20, 16);
+    details->setSpacing(8);
     connectionModeLabel_ = new QLabel;
-    connectionModeLabel_->setObjectName("metricValue");
+    connectionModeLabel_->setObjectName("sectionTitle");
     connectionDetailLabel_ = mutedLabel("");
     connectionDetailLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     connectionPeersLabel_ = new QLabel;
-    connectionPeersLabel_->setObjectName("metricLabel");
+    connectionPeersLabel_->setObjectName("statusBadge");
     connectionRevisionLabel_ = mutedLabel("");
-    summaryLayout->addWidget(heading);
-    summaryLayout->addWidget(connectionModeLabel_);
-    summaryLayout->addWidget(connectionDetailLabel_);
-    summaryLayout->addWidget(connectionPeersLabel_);
-    summaryLayout->addWidget(connectionRevisionLabel_);
+    details->addWidget(connectionModeLabel_);
+    details->addWidget(connectionDetailLabel_);
+    details->addWidget(connectionPeersLabel_, 0, Qt::AlignLeft);
+    details->addWidget(connectionRevisionLabel_);
     layout->addWidget(summary);
-
-    auto* peersCard = card();
-    auto* peersLayout = new QVBoxLayout(peersCard);
-    auto* peersTitle = new QLabel("Connected computers");
-    peersTitle->setObjectName("sectionTitle");
+    auto* label = new QLabel("Connected computers");
+    label->setObjectName("sectionTitle");
+    layout->addWidget(label);
     connectionPeersList_ = new QListWidget;
-    connectionPeersList_->setMinimumHeight(190);
-    peersLayout->addWidget(peersTitle);
-    peersLayout->addWidget(connectionPeersList_);
-    layout->addWidget(peersCard, 1);
-
-    auto* actions = new QHBoxLayout;
-    auto* refresh = button("Sync now", true);
+    connectionPeersList_->setWordWrap(true);
+    connectionPeersList_->setMinimumHeight(140);
+    connectionPeersList_->setMaximumHeight(240);
+    layout->addWidget(connectionPeersList_);
+    auto* tools = new QHBoxLayout;
+    auto* sync = button("Sync now");
     auto* copy = button("Copy connection details");
-    actions->addWidget(refresh);
-    actions->addWidget(copy);
-    actions->addStretch();
-    actions->addWidget(mutedLabel("To change connection mode, sign out and use the controls on the sign-in screen."));
-    layout->addLayout(actions);
-    connect(refresh, &QPushButton::clicked, this, [this] {
-        if (pullNetworkChanges(true)) {
-            updateConnectionUi();
-            showConnectionToast("Workspace synchronized");
-        }
+    auto* transfers = button("Transfers & sync");
+    transfers->setObjectName("transferCenterButton");
+    auto* recovery = button("Backups & recovery");
+    recovery->setObjectName("connectionRecoveryButton");
+    tools->addWidget(sync);
+    tools->addWidget(copy);
+    tools->addWidget(transfers);
+    tools->addWidget(recovery);
+    tools->addStretch();
+    layout->addLayout(tools);
+    layout->addWidget(mutedLabel("Keep TeamSync open on the host. Nearby discovery needs the same Wi-Fi or hotspot and permission on Windows Private networks. The workspace pairing code and team join code are separate."));
+    layout->addStretch();
+    connect(host, &QPushButton::clicked, this, [this] { startHostingDialog(); });
+    connect(join, &QPushButton::clicked, this, [this] { showJoinWorkspaceDialog(); });
+    connect(local, &QPushButton::clicked, this, [this] { switchToLocalWorkspace(); });
+    connect(sync, &QPushButton::clicked, this, [this] {
+        if (pullNetworkChanges(true)) { updateConnectionUi(); showConnectionToast("Workspace synchronized"); }
     });
     connect(copy, &QPushButton::clicked, this, [this] {
         QApplication::clipboard()->setText(lan_->statusText());
         showConnectionToast("Connection details copied");
     });
+    connect(transfers, &QPushButton::clicked, this, [this] { showTransferCenter(); });
+    connect(recovery, &QPushButton::clicked, this, [this] { showRecoveryDialog(); });
     updateConnectionUi();
     return page;
 }
 
 QWidget* TeamSyncGui::buildTutorialPage() {
-    auto* scroll = new QScrollArea;
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto* content = new QWidget;
-    auto* layout = new QVBoxLayout(content);
-    layout->setContentsMargins(30, 26, 30, 34);
-    layout->setSpacing(18);
-
-    auto* intro = card();
-    auto* introLayout = new QVBoxLayout(intro);
-    introLayout->setContentsMargins(24, 22, 24, 22);
-    auto* introTitle = new QLabel("Welcome to TeamSync");
-    introTitle->setObjectName("sectionTitle");
-    introLayout->addWidget(introTitle);
-    introLayout->addWidget(mutedLabel(
-        "Use this short guide to create a workspace, collaborate over Wi-Fi, and finish work with clear evidence."));
-    auto* shortcuts = new QHBoxLayout;
-    auto* tasks = button("Open tasks", true);
-    auto* connection = button("View connection");
-    auto* chat = button("Open chat");
-    shortcuts->addWidget(tasks);
-    shortcuts->addWidget(connection);
-    shortcuts->addWidget(chat);
-    shortcuts->addStretch();
-    introLayout->addLayout(shortcuts);
-    connect(tasks, &QPushButton::clicked, this, [this] { navigateTo(TasksPage); });
-    connect(connection, &QPushButton::clicked, this, [this] { navigateTo(ConnectionPage); });
-    connect(chat, &QPushButton::clicked, this, [this] { showChatPanel(); });
-    layout->addWidget(intro);
-
-    auto* guide = card();
+    auto* page = new QWidget;
+    auto* outer = new QVBoxLayout(page);
+    outer->setContentsMargins(24, 20, 24, 20);
+    outer->setSpacing(12);
+    auto* tabs = new QTabWidget;
+    tabs->setObjectName("tutorialTabs");
+    auto* guide = new QWidget;
     auto* guideLayout = new QVBoxLayout(guide);
-    guideLayout->setContentsMargins(24, 22, 24, 22);
-    guideLayout->setSpacing(12);
-    auto* guideTitle = new QLabel("Quick-start tutorial");
-    guideTitle->setObjectName("sectionTitle");
-    guideLayout->addWidget(guideTitle);
-    const QStringList steps = {
-        "1. Create an account and complete all three security questions, then sign in.",
-        "2. Create a team and share its join code. Team members join from the Teams page.",
-        "3. A team admin creates a project and its tasks, choosing an assignee, due date, priority, and skill.",
-        "4. Any member of that team can start, complete, or reopen a task. Completion can include notes and files.",
-        "5. Use the chat bubble in the bottom-right corner for team messages and the bell in the top-right for notices.",
-        "6. For multiple computers, Host on one sign-in screen and Join on the others using the displayed IP and code.",
-        "7. Shared files, task updates, messages, and completion evidence synchronize automatically on the trusted LAN."
+    guideLayout->setContentsMargins(20, 20, 20, 20);
+    guideLayout->setSpacing(16);
+    const std::vector<std::pair<QString, QString>> steps = {
+        {"1. Choose how to start", "Sign in, create an account, or enter a name with Continue as guest. Remember me securely signs you in next time."},
+        {"2. Connect your computers", "On the same Wi-Fi or hotspot, one person chooses Host workspace. Others use Find & join, select the computer, and enter its six-digit code. Connection controls are available before and after sign-in."},
+        {"3. Join your team", "Workspace connection shares the data. Team membership gives access to work: create a team or join from Teams using its separate team code."},
+        {"4. Plan and complete work", "Use the task Table or Board. Drag between Pending, In progress, and Completed, or use each card's menu/keyboard actions. Drop files onto a task to open completion with notes and attachments. Team membership and permissions still apply."},
+        {"5. Stay up to date", "Use the chat button at the bottom right and the notification bell at the top. Shared files, messages, and task updates synchronize while connected."},
+        {"6. Recover an account", "Forgot password uses the three answers set at signup. My profile lets account holders change their password and recovery answers."},
+        {"7. Keep work safe", "Offline changes remain on this computer and retry when the host returns. Transfers & sync shows bytes, speed, Cancel and Retry. Conflicts never silently overwrite local edits: keep a recovery copy before accepting the host version."},
+        {"8. Back up and restore", "Settings → Backups & recovery lists dated local backups and preserved conflict versions. Only an administrator in local mode can restore the entire workspace. A pre-restore backup is kept automatically."}
     };
     for (const auto& step : steps) {
-        auto* label = new QLabel(step);
-        label->setWordWrap(true);
-        label->setObjectName("tutorialStep");
-        guideLayout->addWidget(label);
+        auto* title = new QLabel(step.first);
+        title->setObjectName("sectionTitle");
+        guideLayout->addWidget(title);
+        guideLayout->addWidget(mutedLabel(step.second));
     }
-    layout->addWidget(guide);
-
-    auto* detailsGrid = new QGridLayout;
-    detailsGrid->setSpacing(18);
-    auto* security = card();
-    auto* securityLayout = new QVBoxLayout(security);
-    securityLayout->setContentsMargins(22, 20, 22, 20);
-    auto* securityTitle = new QLabel("Account recovery");
-    securityTitle->setObjectName("sectionTitle");
-    securityLayout->addWidget(securityTitle);
-    securityLayout->addWidget(mutedLabel(
-        "New accounts answer three personal questions. Forgot password asks the same questions and never displays the saved answers."));
-    auto* securityText = new QLabel(
-        "<b>Good answers are:</b><br>Memorable to you<br>Hard for other people to guess<br>Entered consistently<br><br>"
-        "<b>Existing account?</b><br>Open My profile and choose Configure security questions.");
-    securityText->setWordWrap(true);
-    securityText->setObjectName("materialInset");
-    securityLayout->addWidget(securityText);
-    securityLayout->addStretch();
-
-    auto* credits = card();
-    auto* creditsLayout = new QVBoxLayout(credits);
-    creditsLayout->setContentsMargins(22, 20, 22, 20);
-    auto* creditsTitle = new QLabel("Credits & acknowledgement");
-    creditsTitle->setObjectName("sectionTitle");
-    creditsLayout->addWidget(creditsTitle);
-    auto* creditsText = new QLabel(
+    guideLayout->addStretch();
+    auto* guideScroll = new QScrollArea;
+    guideScroll->setWidgetResizable(true);
+    guideScroll->setFrameShape(QFrame::NoFrame);
+    guideScroll->setWidget(guide);
+    tabs->addTab(guideScroll, "Quick start");
+    auto* credits = new QWidget;
+    auto* creditLayout = new QVBoxLayout(credits);
+    creditLayout->setContentsMargins(24, 24, 24, 24);
+    creditLayout->setSpacing(16);
+    auto* title = new QLabel("Made for better teamwork");
+    title->setObjectName("welcomeTitle");
+    creditLayout->addWidget(title);
+    auto* names = new QLabel(
         "<b>Developers</b><br><br>"
-        "<b>Sudhan Bhattarai</b><br>"
-        "<a href=\"https://www.sudhanb.com.np\">Portfolio &#8599;</a>"
-        "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
-        "<a href=\"https://github.com/SudhanTheDev\">GitHub &#8599;</a><br><br>"
-        "<b>Severoos Nepali</b><br>"
-        "<a href=\"https://www.severoos-nepali.com.np/\">Portfolio &#8599;</a>"
-        "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
-        "<a href=\"https://github.com/Severoos-ui\">GitHub &#8599;</a><br><br>"
-        "<b>Project Support</b><br>Senior Sudip Khanal<br><br>"
-        "<b>Academic Guidance</b><br>Ojan Adhikari<br><br>"
-        "Second Semester · Object-Oriented Programming · C++17 and Qt");
-    creditsText->setWordWrap(true);
-    creditsText->setTextFormat(Qt::RichText);
-    creditsText->setTextInteractionFlags(Qt::TextBrowserInteraction);
-    creditsText->setOpenExternalLinks(true);
-    creditsText->setObjectName("materialInset");
-    creditsLayout->addWidget(creditsText);
-    creditsLayout->addStretch();
-    detailsGrid->addWidget(security, 0, 0);
-    detailsGrid->addWidget(credits, 0, 1);
-    detailsGrid->setColumnStretch(0, 1);
-    detailsGrid->setColumnStretch(1, 1);
-    layout->addLayout(detailsGrid);
-    layout->addStretch();
-    scroll->setWidget(content);
-    return scroll;
+        "Sudhan Bhattarai<br>"
+        "<a href=\"https://www.sudhanb.com.np\">Portfolio</a> · "
+        "<a href=\"https://github.com/SudhanTheDev\">GitHub</a><br><br>"
+        "Severoos Nepali<br>"
+        "<a href=\"https://www.severoos-nepali.com.np/\">Portfolio</a> · "
+        "<a href=\"https://github.com/Severoos-ui\">GitHub</a><br><br>"
+        "<b>Project support</b><br>Senior Sudip Khanal<br><br>"
+        "<b>Academic guidance</b><br>Ojan Adhikari<br><br>"
+        "<b>Built with</b><br>C++17 · Qt 6 Widgets and Qt Network<br><br>");
+    names->setWordWrap(true);
+    names->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    names->setOpenExternalLinks(true);
+    creditLayout->addWidget(names);
+    creditLayout->addStretch();
+    auto* creditScroll = new QScrollArea;
+    creditScroll->setWidgetResizable(true);
+    creditScroll->setFrameShape(QFrame::NoFrame);
+    creditScroll->setWidget(credits);
+    tabs->addTab(creditScroll, "Credits");
+    outer->addWidget(tabs);
+    return page;
 }
 
 QWidget* TeamSyncGui::buildProfilePage() {
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
     auto* page = new QWidget;
     auto* outer = new QVBoxLayout(page);
-    outer->setContentsMargins(30, 26, 30, 30);
-    auto* profileCard = card();
-    profileCard->setMaximumWidth(760);
-    auto* layout = new QVBoxLayout(profileCard);
-    layout->setContentsMargins(28, 26, 28, 26);
-    layout->setSpacing(12);
-    auto* heading = new QLabel("Profile information");
-    heading->setObjectName("sectionTitle");
-    layout->addWidget(heading);
-    layout->addWidget(mutedLabel("Your skills are used by TeamSync's member recommendation scoring."));
+    outer->setContentsMargins(24, 20, 24, 20);
+    auto* panel = card();
+    panel->setMaximumWidth(780);
+    auto* layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(20, 20, 20, 20);
+    layout->setSpacing(16);
+    auto* title = new QLabel("Profile information");
+    title->setObjectName("sectionTitle");
+    layout->addWidget(title);
+    layout->addWidget(mutedLabel("Your name appears in team activity. Skills help with task recommendations."));
     auto* form = new QFormLayout;
     form->setSpacing(12);
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     profileName_ = new QLineEdit;
+    profileName_->setObjectName("profileName");
     profileUsername_ = new QLineEdit;
     profileUsername_->setReadOnly(true);
     profileEmail_ = new QLineEdit;
     profileSkills_ = new QLineEdit;
     profileSkills_->setPlaceholderText("C++, research, documentation");
-    profileRole_ = new QLabel;
+    profileRole_ = mutedLabel("");
     form->addRow("Full name", profileName_);
     form->addRow("Username", profileUsername_);
     form->addRow("Email", profileEmail_);
     form->addRow("Skills", profileSkills_);
-    form->addRow("Account role", profileRole_);
+    form->addRow("Account", profileRole_);
     layout->addLayout(form);
-    auto* actions = new QHBoxLayout;
     auto* save = button("Save profile", true);
+    save->setObjectName("saveProfileButton");
+    layout->addWidget(save, 0, Qt::AlignLeft);
+    auto* separator = new QFrame;
+    separator->setFrameShape(QFrame::HLine);
+    layout->addWidget(separator);
+    auto* securityTitle = new QLabel("Account security");
+    securityTitle->setObjectName("sectionTitle");
+    layout->addWidget(securityTitle);
+    auto* securityActions = new QHBoxLayout;
     auto* password = button("Change password");
     auto* security = button("Configure security questions");
-    actions->addWidget(save);
-    actions->addWidget(password);
-    actions->addWidget(security);
-    actions->addStretch();
-    layout->addLayout(actions);
-    outer->addWidget(profileCard, 0, Qt::AlignHCenter);
+    securityActions->addWidget(password);
+    securityActions->addWidget(security);
+    securityActions->addStretch();
+    layout->addLayout(securityActions);
+    outer->addWidget(panel);
     outer->addStretch();
     connect(save, &QPushButton::clicked, this, [this] { saveProfile(); });
     connect(password, &QPushButton::clicked, this, [this] { showChangePasswordDialog(); });
     connect(security, &QPushButton::clicked, this, [this] { showSecurityQuestionsDialog(); });
+    scroll->setWidget(page);
+    return scroll;
+}
+
+QWidget* TeamSyncGui::buildSettingsPage() {
+    auto* page = new QWidget;
+    page->setObjectName("settingsPage");
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(24, 20, 24, 20);
+    layout->setSpacing(16);
+    auto* appearance = card();
+    appearance->setMaximumWidth(780);
+    auto* options = new QVBoxLayout(appearance);
+    options->setContentsMargins(20, 20, 20, 20);
+    options->setSpacing(12);
+    auto* title = new QLabel("Appearance");
+    title->setObjectName("sectionTitle");
+    options->addWidget(title);
+    auto* form = new QFormLayout;
+    themeChoice_ = new QComboBox;
+    themeChoice_->setObjectName("themeChoice");
+    themeChoice_->addItems({"Use system setting", "Light", "Dark"});
+    const QString saved = appSettings().value("appearance/theme", "system").toString();
+    themeChoice_->setCurrentIndex(saved == "dark" ? 2 : saved == "light" ? 1 : 0);
+    form->addRow("Color theme", themeChoice_);
+    options->addLayout(form);
+    auto* motion = new QCheckBox("Use subtle popup animations");
+    motion->setObjectName("popupAnimations");
+    motion->setChecked(popupAnimations_);
+    options->addWidget(motion);
+    options->addWidget(mutedLabel("Preferences apply to every page and dialog, and are saved on this computer."));
+    connect(themeChoice_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](const int index) {
+        const QString mode = index == 0 ? "system" : index == 1 ? "light" : "dark";
+        appSettings().setValue("appearance/theme", mode);
+        applyTheme(index == 0 ? ThemeManager::systemPrefersDark() : index == 2);
+    });
+    connect(motion, &QCheckBox::toggled, this, [this](const bool enabled) {
+        popupAnimations_ = enabled;
+        qApp->setProperty("animationsEnabled", enabled);
+        appSettings().setValue("appearance/popupAnimations", enabled);
+    });
+    layout->addWidget(appearance);
+    auto* account = card();
+    account->setMaximumWidth(780);
+    auto* security = new QVBoxLayout(account);
+    security->setContentsMargins(20, 20, 20, 20);
+    security->setSpacing(12);
+    auto* accountTitle = new QLabel("Saved sign-in");
+    accountTitle->setObjectName("sectionTitle");
+    security->addWidget(accountTitle);
+    security->addWidget(mutedLabel("Remember me uses Windows account encryption. Sign out or clear the saved sign-in when sharing a computer. Guest sessions are not remembered."));
+    auto* forget = button("Clear saved sign-in");
+    forget->setObjectName("clearSavedLoginButton");
+    security->addWidget(forget, 0, Qt::AlignLeft);
+    connect(forget, &QPushButton::clicked, this, [this] {
+        clearRememberedLogin();
+        rememberLogin_->setChecked(false);
+        showStatus("Saved sign-in cleared. Your current session is still open.");
+    });
+    layout->addWidget(account);
+    auto* recovery = card();
+    recovery->setMaximumWidth(780);
+    auto* recoveryLayout = new QVBoxLayout(recovery);
+    recoveryLayout->setContentsMargins(20, 20, 20, 20);
+    auto* recoveryTitle = new QLabel("Workspace safety");
+    recoveryTitle->setObjectName("sectionTitle");
+    recoveryLayout->addWidget(recoveryTitle);
+    recoveryLayout->addWidget(mutedLabel("Dated local backups and preserved conflict copies protect your work. Restore is available to workspace administrators in local mode."));
+    auto* recoveryOpen = button("Backups & recovery");
+    recoveryOpen->setObjectName("settingsRecoveryButton");
+    recoveryLayout->addWidget(recoveryOpen, 0, Qt::AlignLeft);
+    connect(recoveryOpen, &QPushButton::clicked, this, [this] { showRecoveryDialog(); });
+    layout->addWidget(recovery);
+    auto* shortcuts = mutedLabel("Keyboard shortcuts: Ctrl+1–8 switches workspace pages. Ctrl+R refreshes. Ctrl+, opens Settings. F1 opens Tutorial & Credits.");
+    shortcuts->setMaximumWidth(780);
+    layout->addWidget(shortcuts);
+    layout->addStretch();
     return page;
 }
 
 void TeamSyncGui::attemptLogin() {
     if (loginUsername_->text().trimmed().isEmpty() || loginPassword_->text().isEmpty()) {
+        for (auto* input : {loginUsername_, loginPassword_}) {
+            input->setProperty("validationError", input->text().trimmed().isEmpty());
+            input->style()->unpolish(input);
+            input->style()->polish(input);
+        }
         QMessageBox::information(this, "Sign in", "Enter both your username and password.");
+        (loginUsername_->text().trimmed().isEmpty() ? loginUsername_ : loginPassword_)->setFocus();
         return;
     }
+    guestSession_ = false;
     if (!perform([this] {
             currentUser_ = &service_->login(s(loginUsername_->text().trimmed()), s(loginPassword_->text()));
         })) return;
 
-    signedInUser_->setText("<b>" + q(currentUser_->fullName()).toHtmlEscaped() + "</b><br>" +
-                           q(currentUser_->username()).toHtmlEscaped() + "  •  " + q(toString(currentUser_->role())));
+    const bool remember = rememberLogin_ && rememberLogin_->isChecked();
+    if (!remember) clearRememberedLogin();
+    sessionPassword_ = loginPassword_->text();
+    finishLogin(remember);
+}
+
+void TeamSyncGui::finishLogin(const bool remember) {
+    if (!currentUser_) return;
+    if (remember && !guestSession_) {
+        rememberLogin(q(currentUser_->username()), loginPassword_->text());
+    }
+
+    refreshSessionUi(false);
     loginPassword_->clear();
-    rootStack_->setCurrentWidget(shellPage_);
-    refreshTeamSelectors();
-    updateNotificationButton();
     navigateTo(DashboardPage);
     animatePage(shellPage_);
     showStatus("Signed in successfully");
+}
+
+void TeamSyncGui::refreshSessionUi(const bool refreshPage) {
+    if (!currentUser_) return;
+    signedInUser_->setText(signedInUser_->fontMetrics().elidedText(q(currentUser_->fullName()), Qt::ElideRight, 166) + "\n" +
+        signedInUser_->fontMetrics().elidedText(guestSession_ ? "Guest session" : q(currentUser_->username()), Qt::ElideRight, 166));
+    signedInUser_->setToolTip(q(currentUser_->fullName()) + " · " + q(toString(currentUser_->role())));
+    if (navigationButtons_.size() > ProfilePage) {
+        if (auto* profile = dynamic_cast<ui::ProfileButton*>(navigationButtons_[ProfilePage]))
+            profile->setProfile(q(currentUser_->fullName()), guestSession_ ? "Guest session" :
+                currentUser_->role() == UserRole::Admin ? "Administrator" : "Team member");
+    }
+    rootStack_->setCurrentWidget(shellPage_);
+    refreshTeamSelectors();
+    updateNotificationButton();
+    if (refreshPage) refreshCurrentPage();
+}
+
+void TeamSyncGui::rememberLogin(const QString& username, const QString& password) {
+    if (password.isEmpty()) return;
+    const QByteArray encrypted = protectSavedPassword(password.toUtf8());
+    if (encrypted.isEmpty()) return;
+    auto settings = appSettings();
+    settings.setValue("session/username", username);
+    settings.setValue("session/protectedPassword", QString::fromLatin1(encrypted.toBase64()));
+    settings.setValue("session/workspace", QString::fromStdWString(activeRoot_.wstring()));
+}
+
+void TeamSyncGui::clearRememberedLogin() {
+    auto settings = appSettings();
+    settings.remove("session/username");
+    settings.remove("session/protectedPassword");
+    settings.remove("session/workspace");
+}
+
+void TeamSyncGui::attemptRememberedLogin() {
+    auto settings = appSettings();
+    const QString username = settings.value("session/username").toString();
+    const QByteArray encrypted = QByteArray::fromBase64(settings.value("session/protectedPassword").toString().toLatin1());
+    const QString savedWorkspace = settings.value("session/workspace").toString();
+    if (username.isEmpty() || encrypted.isEmpty()) return;
+    if (savedWorkspace != QString::fromStdWString(activeRoot_.wstring())) return;
+
+    const QByteArray password = unprotectSavedPassword(encrypted);
+    if (password.isEmpty()) {
+        clearRememberedLogin();
+        return;
+    }
+    try {
+        guestSession_ = false;
+        lan_->executeLocalMutation([&] {
+            currentUser_ = &service_->login(s(username), std::string(password.constData(), static_cast<std::size_t>(password.size())));
+        });
+        if (lan_->mode() != LanSyncManager::Mode::Local) lan_->noteLocalChange();
+        sessionPassword_ = QString::fromUtf8(password);
+        finishLogin(false);
+        showStatus("Signed in securely");
+    } catch (const std::exception&) {
+        clearRememberedLogin();
+        loginUsername_->setText(username);
+    }
+}
+
+void TeamSyncGui::showGuestDialog() {
+    bool accepted = false;
+    const QString name = QInputDialog::getText(this, "Continue as guest", "Your display name:",
+                                               QLineEdit::Normal, {}, &accepted).trimmed();
+    if (!accepted || name.isEmpty()) return;
+
+    const QString unique = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString username = "guest_" + unique.left(12);
+    const QString password = "guest-" + unique;
+    const std::vector<std::string> answers = {
+        s("guest-a-" + unique), s("guest-b-" + unique), s("guest-c-" + unique)
+    };
+    guestSession_ = true;
+    if (!perform([&] {
+            currentUser_ = &service_->registerUser(s(name), s(username), s(password), s(password), "",
+                                                  UserRole::TeamMember, {}, answers);
+        }, "Guest session started")) {
+        guestSession_ = false;
+        return;
+    }
+    clearRememberedLogin();
+    sessionPassword_ = password;
+    finishLogin(false);
+    showConnectionToast("Welcome, " + name + " — you are using guest mode");
 }
 
 void TeamSyncGui::showRegistrationDialog() {
@@ -1846,6 +2290,7 @@ void TeamSyncGui::showForgotPasswordDialog() {
     auto* username = new QLineEdit;
     username->setObjectName("recoveryUsername");
     username->setText(loginUsername_->text().trimmed());
+    auto* accountHint = mutedLabel("Enter your username to unlock its recovery questions.");
     std::array<QLineEdit*, 3> securityAnswers{};
     auto* replacement = new QLineEdit;
     replacement->setObjectName("recoveryPassword");
@@ -1863,20 +2308,40 @@ void TeamSyncGui::showForgotPasswordDialog() {
     form->addRow("New password", replacement);
     form->addRow("Confirm password", confirmation);
     layout->addLayout(form);
+    layout->addWidget(accountHint);
     layout->addWidget(mutedLabel(
         "Answers ignore capitalization and spaces at the beginning or end. Existing accounts can configure them from My profile."));
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok);
     buttons->button(QDialogButtonBox::Ok)->setText("Reset password");
     buttons->button(QDialogButtonBox::Ok)->setProperty("primary", true);
     layout->addWidget(buttons);
+    const auto updateRecoveryAvailability = [this, username, accountHint, &securityAnswers,
+                                             replacement, confirmation, buttons] {
+        const bool knownAccount = service_->findUserByUsername(s(username->text())) != nullptr;
+        for (auto* answer : securityAnswers) answer->setEnabled(knownAccount);
+        replacement->setEnabled(knownAccount);
+        confirmation->setEnabled(knownAccount);
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(knownAccount);
+        accountHint->setText(knownAccount
+            ? "Account found. Answer its three personal recovery questions."
+            : "No account was found yet. Check the username or create an account.");
+    };
+    connect(username, &QLineEdit::textChanged, &dialog, updateRecoveryAvailability);
+    updateRecoveryAvailability();
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        if (!service_->findUserByUsername(s(username->text()))) {
+            QMessageBox::warning(&dialog, "TeamSync", "No account exists with that username.");
+            updateRecoveryAvailability();
+            return;
+        }
         std::vector<std::string> answerValues;
         for (auto* answer : securityAnswers) answerValues.push_back(s(answer->text()));
         if (perform([&] {
                 service_->resetPassword(s(username->text()), answerValues,
                                         s(replacement->text()), s(confirmation->text()));
             }, "Password reset successfully")) {
+            clearRememberedLogin();
             loginUsername_->setText(username->text().trimmed());
             loginPassword_->clear();
             dialog.accept();
@@ -1890,66 +2355,14 @@ void TeamSyncGui::showTutorialAndCreditsDialog() {
     QDialog dialog(this);
     dialog.setObjectName("tutorialCreditsDialog");
     dialog.setWindowTitle("Tutorial & Credits");
-    dialog.resize(760, 680);
-    dialog.setMinimumSize(580, 520);
-    auto* outer = new QVBoxLayout(&dialog);
-    auto* scroll = new QScrollArea;
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto* content = new QWidget;
-    auto* layout = new QVBoxLayout(content);
-    layout->setContentsMargins(24, 24, 24, 24);
-    layout->setSpacing(16);
-    auto* heading = new QLabel("Tutorial & Credits");
-    heading->setObjectName("dialogHeroTitle");
-    layout->addWidget(heading);
-    layout->addWidget(mutedLabel("Everything you need to get started with TeamSync."));
-
-    const QStringList steps = {
-        "1. Create an account and answer all three personal security questions.",
-        "2. Sign in, create a team, and share its join code with your members.",
-        "3. Team admins create projects and tasks. Any team member can start or complete team tasks.",
-        "4. Use the bottom-right chat bubble and top-right notification bell to stay coordinated.",
-        "5. Host or Join from the sign-in screen to synchronize computers on the same trusted Wi-Fi or hotspot.",
-        "6. Add completion notes and files when finishing work; connected computers receive the update automatically."
-    };
-    for (const auto& step : steps) {
-        auto* label = new QLabel(step);
-        label->setWordWrap(true);
-        label->setObjectName("tutorialStep");
-        layout->addWidget(label);
-    }
-
-    auto* security = new QLabel(
-        "<b>Password recovery</b><br>Your three answers are stored only as hashes. If you forget your password, enter the same answers. "
-        "Capitalization and spaces at the beginning or end are ignored.");
-    security->setWordWrap(true);
-    security->setObjectName("materialInset");
-    layout->addWidget(security);
-    auto* credits = new QLabel(
-        "<b>Developers</b><br><br>"
-        "<b>Sudhan Bhattarai</b><br>"
-        "<a href=\"https://www.sudhanb.com.np\">Portfolio &#8599;</a>"
-        "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
-        "<a href=\"https://github.com/SudhanTheDev\">GitHub &#8599;</a><br><br>"
-        "<b>Severoos Nepali</b><br>"
-        "<a href=\"https://www.severoos-nepali.com.np/\">Portfolio &#8599;</a>"
-        "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
-        "<a href=\"https://github.com/Severoos-ui\">GitHub &#8599;</a><br><br>"
-        "<b>Project Support</b><br>Senior Sudip Khanal<br><br>"
-        "<b>Academic Guidance</b><br>Ojan Adhikari");
-    credits->setWordWrap(true);
-    credits->setTextFormat(Qt::RichText);
-    credits->setTextInteractionFlags(Qt::TextBrowserInteraction);
-    credits->setOpenExternalLinks(true);
-    credits->setObjectName("materialInset");
-    layout->addWidget(credits);
-    layout->addStretch();
-    scroll->setWidget(content);
-    outer->addWidget(scroll, 1);
+    dialog.resize(760, 620);
+    dialog.setMinimumSize(560, 460);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(0, 0, 0, 12);
+    layout->addWidget(buildTutorialPage(), 1);
     auto* close = new QDialogButtonBox(QDialogButtonBox::Close);
+    layout->addWidget(close);
     connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
-    outer->addWidget(close);
     dialog.exec();
 }
 
@@ -1957,9 +2370,12 @@ void TeamSyncGui::logout() {
     if (!currentUser_) return;
     if (QMessageBox::question(this, "Sign out", "Sign out of TeamSync?") != QMessageBox::Yes) return;
     perform([this] { service_->logout(currentUserId()); });
+    clearRememberedLogin();
     if (chatDialog_) chatDialog_->hide();
     if (notificationsDialog_) notificationsDialog_->hide();
     currentUser_ = nullptr;
+    guestSession_ = false;
+    sessionPassword_.clear();
     signedInUser_->setText("Not signed in");
     rootStack_->setCurrentWidget(authPage_);
     loginPassword_->clear();
@@ -1986,22 +2402,234 @@ void TeamSyncGui::refreshCurrentPage() {
 }
 
 void TeamSyncGui::refreshDashboard() {
+    if (!currentUser_) return;
     updateNotificationButton();
     perform([this] {
-        const auto stats = Dashboard::calculate(*service_, currentUserId());
-        const std::vector<int> values = {stats.joinedTeams, stats.projects, stats.pendingTasks,
-                                         stats.inProgressTasks, stats.completedTasks, stats.unreadNotifications};
-        for (std::size_t index = 0; index < dashboardValues_.size() && index < values.size(); ++index) {
-            dashboardValues_[index]->setText(QString::number(values[index]));
+        const int userId = currentUserId();
+        const auto teams = service_->teamsForUser(userId);
+        const auto projects = service_->projectsForUser(userId);
+        auto assigned = service_->tasksForUser(userId);
+        const auto visibleTasks = service_->searchTasks(userId, "");
+        std::set<int> members;
+        for (const auto* team : teams) members.insert(team->memberIds().begin(), team->memberIds().end());
+        int active = 0, mine = 0, completed = 0, soon = 0, completedWeek = 0;
+        for (const auto* project : projects)
+            if (project->status() != ProjectStatus::Archived && project->status() != ProjectStatus::Completed) ++active;
+        for (const auto* task : assigned) {
+            if (task->status() == TaskStatus::Completed) continue;
+            ++mine;
+            const int days = QDate::currentDate().daysTo(toQDate(task->dueDate()));
+            if (days >= 0 && days <= 7) ++soon;
         }
-        dashboardStatusSummary_->setText(QString("%1 Pending   •   %2 In Progress   •   %3 Completed")
-            .arg(stats.pendingTasks).arg(stats.inProgressTasks).arg(stats.completedTasks));
-        recentMessages_->clear();
-        for (const auto& message : stats.recentMessages) recentMessages_->addItem(q(message));
-        if (stats.recentMessages.empty()) recentMessages_->addItem("No recent team messages yet.");
-        recentActivities_->clear();
-        for (const auto& activity : stats.recentActivities) recentActivities_->addItem(q(activity));
-        if (stats.recentActivities.empty()) recentActivities_->addItem("No recent activity yet.");
+        for (const auto* task : visibleTasks) if (task->status() == TaskStatus::Completed) {
+            ++completed;
+            if (task->completionDate()) {
+                const int days = toQDate(*task->completionDate()).daysTo(QDate::currentDate());
+                if (days >= 0 && days < 7) ++completedWeek;
+            }
+        }
+        const std::array<int, 4> values = {active, mine, completed, static_cast<int>(members.size())};
+        for (std::size_t i = 0; i < values.size(); ++i) dashboardValues_[i]->setText(QString::number(values[i]));
+        dashboardTrends_[0]->setText(QString("%1 team%2").arg(teams.size()).arg(teams.size() == 1 ? "" : "s"));
+        dashboardTrends_[1]->setText(soon > 0 ? QString("%1 due this week").arg(soon) : "No tasks due soon");
+        dashboardTrends_[2]->setText(QString("%1 this week").arg(completedWeek));
+        dashboardTrends_[3]->setText(guestSession_ ? "Guest workspace" : "Across your teams");
+        const bool empty = teams.empty();
+        dashboardEmpty_->setVisible(empty);
+        dashboardEmpty_->setText("Your workspace is ready. Create a team or join with its team code to start collaborating.");
+        if (empty) {
+            auto* owner = dashboardEmpty_->parentWidget();
+            if (!owner->findChild<QPushButton*>("overviewCreateTeam")) {
+                auto* row = new QWidget;
+                row->setObjectName("overviewOnboardingActions");
+                auto* actions = new QHBoxLayout(row);
+                actions->setContentsMargins(0, 0, 0, 0);
+                auto* create = button("Create team", true);
+                create->setObjectName("overviewCreateTeam");
+                auto* join = button("Join a team");
+                actions->addWidget(create);
+                actions->addWidget(join);
+                actions->addStretch();
+                connect(create, &QPushButton::clicked, this, [this] { showCreateTeamDialog(); refreshDashboard(); });
+                connect(join, &QPushButton::clicked, this, [this] { joinTeam(); refreshDashboard(); });
+                qobject_cast<QVBoxLayout*>(owner->layout())->insertWidget(2, row);
+            }
+        }
+        if (auto* actions = dashboardEmpty_->parentWidget()->findChild<QWidget*>("overviewOnboardingActions")) actions->setVisible(empty);
+        myTasksModel_->removeRows(0, myTasksModel_->rowCount());
+        std::stable_sort(assigned.begin(), assigned.end(), [](const Task* a, const Task* b) {
+            if ((a->status() == TaskStatus::Completed) != (b->status() == TaskStatus::Completed))
+                return a->status() != TaskStatus::Completed;
+            return a->dueDate() < b->dueDate();
+        });
+        for (const auto* task : assigned) {
+            if (myTasksModel_->rowCount() >= 5) break;
+            auto* title = new QStandardItem(q(task->title()));
+            title->setData(task->id(), Qt::UserRole);
+            title->setToolTip(q(task->description()));
+            auto* priority = new QStandardItem(q(toString(task->priority())));
+            priority->setData(static_cast<int>(ui::CellKind::Priority), ui::KindRole);
+            auto* status = new QStandardItem(q(toString(task->status())));
+            status->setData(static_cast<int>(ui::CellKind::Status), ui::KindRole);
+            myTasksModel_->appendRow({title, new QStandardItem(q(service_->project(task->projectId()).title())),
+                priority, new QStandardItem(toQDate(task->dueDate()).toString("MMM d, yyyy")), status});
+        }
+        auto clearRows = [](QVBoxLayout* rows) {
+            while (auto* item = rows->takeAt(0)) { if (auto* widget = item->widget()) delete widget; delete item; }
+        };
+        clearRows(projectRows_);
+        clearRows(activityRows_);
+        clearRows(updateRows_);
+        int projectCount = 0;
+        for (const auto* project : projects) {
+            if (project->status() == ProjectStatus::Archived || project->status() == ProjectStatus::Completed || projectCount >= 3) continue;
+            ++projectCount;
+            int total = 0, done = 0;
+            for (int id : project->taskIds()) {
+                try { const auto& task = service_->task(id); ++total; if (task.status() == TaskStatus::Completed) ++done; }
+                catch (const std::exception&) {}
+            }
+            const int percent = total == 0 ? 0 : qRound(100.0 * done / total);
+            auto* row = new QWidget;
+            auto* content = new QHBoxLayout(row);
+            content->setContentsMargins(0, 12, 0, 12);
+            content->setSpacing(8);
+            content->addWidget(new ui::IconTile("folder", projectCount == 2 ? "amber" : "blue", 30));
+            auto* text = new QVBoxLayout;
+            text->setSpacing(4);
+            auto* title = new QLabel(q(project->title()));
+            title->setObjectName("projectRowTitle");
+            title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            title->setToolTip(q(project->title()));
+            auto* description = mutedLabel(q(project->description()));
+            description->setObjectName("metadata");
+            description->setWordWrap(false);
+            description->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            description->setToolTip(q(project->description()));
+            text->addWidget(title);
+            text->addWidget(description);
+            content->addLayout(text, 1);
+            auto* progress = new QProgressBar;
+            progress->setProperty("compactProgress", true);
+            progress->setRange(0, 100);
+            progress->setValue(0);
+            ui::animateProgress(progress, percent);
+            progress->setTextVisible(false);
+            progress->setFixedSize(64, 8);
+            progress->setToolTip(QString("%1 of %2 tasks completed").arg(done).arg(total));
+            content->addWidget(progress);
+            auto* amount = mutedLabel(QString::number(percent) + "%");
+            amount->setWordWrap(false);
+            amount->setObjectName("metadata");
+            amount->setFixedWidth(30);
+            content->addWidget(amount);
+            QStringList names;
+            for (int member : service_->team(project->teamId()).memberIds()) names << q(service_->user(member).fullName());
+            auto* avatars = new ui::AvatarStack;
+            avatars->setFixedWidth(64);
+            avatars->setNames(names);
+            content->addWidget(avatars);
+            auto* taskCount = mutedLabel(QString("%1 tasks").arg(total));
+            taskCount->setWordWrap(false);
+            taskCount->setObjectName("metadata");
+            taskCount->setFixedWidth(44);
+            content->addWidget(taskCount);
+            auto* more = button("⋮");
+            more->setObjectName("rowContextButton");
+            more->setFixedSize(24, 28);
+            more->setAccessibleName("Project actions");
+            auto* menu = new QMenu(more);
+            const int id = project->id();
+            auto select = [this, id] {
+                navigateTo(ProjectsPage);
+                for (int row = 0; row < projectsTable_->rowCount(); ++row)
+                    if (projectsTable_->item(row, 0)->data(Qt::UserRole).toInt() == id) projectsTable_->selectRow(row);
+            };
+            menu->addAction("Open project", this, [select] { select(); });
+            menu->addAction("Edit project", this, [this, select] { select(); showProjectDialog(true); });
+            menu->addAction("Archive project", this, [this, select] { select(); archiveSelectedProject(); });
+            more->setMenu(menu);
+            content->addWidget(more);
+            projectRows_->addWidget(row);
+        }
+        if (projectCount == 0) {
+            auto* empty = mutedLabel("No active projects yet. Team admins can create one from Projects.");
+            empty->setMinimumHeight(88);
+            projectRows_->addWidget(empty);
+        }
+        auto relative = [](const std::string& value) {
+            const auto date = QDateTime::fromString(q(value), "yyyy-MM-dd HH:mm:ss");
+            if (!date.isValid()) return q(value);
+            const qint64 seconds = date.secsTo(QDateTime::currentDateTime());
+            if (seconds < 60) return QString("Just now");
+            if (seconds < 3600) return QString("%1 min ago").arg(seconds / 60);
+            if (seconds < 86400) return QString("%1 hr ago").arg(seconds / 3600);
+            return date.toString("MMM d");
+        };
+        const auto activities = service_->activitiesForUser(userId);
+        int activityCount = 0;
+        for (auto it = activities.rbegin(); it != activities.rend() && activityCount < 4; ++it) {
+            const auto* activity = *it;
+            if (activity->teamId() == 0 && activity->action() == "Login") continue;
+            ++activityCount;
+            auto* row = new QWidget;
+            auto* content = new QHBoxLayout(row);
+            content->setContentsMargins(0, 3, 0, 3);
+            content->setSpacing(12);
+            const auto action = q(activity->action());
+            const QString symbol = action.contains("file", Qt::CaseInsensitive) ? "files" :
+                action.contains("task", Qt::CaseInsensitive) ? "tasks" :
+                action.contains("team", Qt::CaseInsensitive) ? "teams" : "folder";
+            const QString tone = symbol == "files" ? "red" : symbol == "tasks" ? "green" : "blue";
+            content->addWidget(new ui::IconTile(symbol, tone, 34), 0, Qt::AlignTop);
+            auto* text = new QVBoxLayout;
+            text->setSpacing(4);
+            auto* description = new QLabel(action);
+            description->setWordWrap(true);
+            description->setObjectName("activityTitle");
+            description->setToolTip(action);
+            auto* metadata = mutedLabel((activity->teamId() > 0 ? q(service_->team(activity->teamId()).name()) : "TeamSync") +
+                                        " · " + relative(activity->dateTime()));
+            metadata->setObjectName("metadata");
+            text->addWidget(description);
+            text->addWidget(metadata);
+            content->addLayout(text, 1);
+            activityRows_->addWidget(row);
+        }
+        if (activityCount == 0) activityRows_->addWidget(mutedLabel("Team activity will appear here as you work."));
+        int updateCount = 0;
+        for (auto it = service_->messages().rbegin(); it != service_->messages().rend() && updateCount < 3; ++it) {
+            try {
+                if (!service_->team(it->teamId()).hasMember(userId)) continue;
+                const QString name = q(service_->user(it->senderId()).fullName());
+                ++updateCount;
+                auto* row = new QWidget;
+                auto* content = new QHBoxLayout(row);
+                content->setContentsMargins(0, 3, 0, 3);
+                content->setSpacing(12);
+                auto* avatar = new QLabel;
+                avatar->setPixmap(ui::avatarIcon(name, 32).pixmap(32, 32));
+                content->addWidget(avatar, 0, Qt::AlignTop);
+                auto* text = new QVBoxLayout;
+                text->setSpacing(4);
+                auto* top = new QHBoxLayout;
+                auto* sender = new QLabel(name);
+                sender->setObjectName("activityTitle");
+                top->addWidget(sender, 1);
+                auto* time = mutedLabel(relative(it->dateTime()));
+                time->setObjectName("metadata");
+                time->setWordWrap(false);
+                top->addWidget(time);
+                text->addLayout(top);
+                auto* message = mutedLabel(q(it->text()).left(170));
+                message->setWordWrap(true);
+                message->setToolTip(q(it->text()));
+                text->addWidget(message);
+                content->addLayout(text, 1);
+                updateRows_->addWidget(row);
+            } catch (const std::exception&) {}
+        }
+        if (updateCount == 0) updateRows_->addWidget(mutedLabel("No team messages yet. Open chat to start a conversation."));
     });
 }
 
@@ -2028,54 +2656,7 @@ void TeamSyncGui::refreshTeams() {
     });
 }
 
-void TeamSyncGui::refreshProjects() {
-    if (!currentUser_) return;
-    perform([this] {
-        const auto values = service_->searchProjects(currentUserId(), s(projectSearch_ ? projectSearch_->text() : QString{}));
-        projectsTable_->setRowCount(0);
-        for (const auto* value : values) {
-            const int row = projectsTable_->rowCount();
-            projectsTable_->insertRow(row);
-            auto* id = new QTableWidgetItem(QString::number(value->id()));
-            id->setData(Qt::UserRole, value->id());
-            projectsTable_->setItem(row, 0, id);
-            projectsTable_->setItem(row, 1, new QTableWidgetItem(q(value->title())));
-            projectsTable_->setItem(row, 2, new QTableWidgetItem(q(service_->team(value->teamId()).name())));
-            projectsTable_->setItem(row, 3, new QTableWidgetItem(q(toString(value->status()))));
-            projectsTable_->setItem(row, 4, new QTableWidgetItem(q(value->startDate().toString())));
-            projectsTable_->setItem(row, 5, new QTableWidgetItem(q(value->dueDate().toString())));
-        }
-    });
-}
 
-void TeamSyncGui::refreshTasks() {
-    if (!currentUser_) return;
-    perform([this] {
-        auto values = service_->searchTasks(currentUserId(), s(taskSearch_ ? taskSearch_->text() : QString{}));
-        const int filter = taskFilter_ ? taskFilter_->currentIndex() : 0;
-        if (filter > 0) {
-            const auto wanted = static_cast<TaskStatus>(filter - 1);
-            values.erase(std::remove_if(values.begin(), values.end(), [wanted](const Task* value) {
-                return value->status() != wanted;
-            }), values.end());
-        }
-        tasksTable_->setRowCount(0);
-        for (const auto* value : values) {
-            const int row = tasksTable_->rowCount();
-            tasksTable_->insertRow(row);
-            auto* id = new QTableWidgetItem(QString::number(value->id()));
-            id->setData(Qt::UserRole, value->id());
-            tasksTable_->setItem(row, 0, id);
-            tasksTable_->setItem(row, 1, new QTableWidgetItem(q(value->title())));
-            tasksTable_->setItem(row, 2, new QTableWidgetItem(q(service_->team(value->teamId()).name())));
-            tasksTable_->setItem(row, 3, new QTableWidgetItem(q(service_->user(value->assignedUserId()).fullName())));
-            tasksTable_->setItem(row, 4, new QTableWidgetItem(q(toString(value->priority()))));
-            tasksTable_->setItem(row, 5, new QTableWidgetItem(q(toString(value->status()))));
-            tasksTable_->setItem(row, 6, new QTableWidgetItem(q(value->dueDate().toString())));
-            tasksTable_->setItem(row, 7, new QTableWidgetItem(q(value->requiredSkill())));
-        }
-    });
-}
 
 void TeamSyncGui::refreshTeamSelectors() {
     if (!currentUser_) return;
@@ -2136,7 +2717,7 @@ void TeamSyncGui::refreshFiles() {
             filesTable_->setItem(row, 2, new QTableWidgetItem(q(value->description())));
             filesTable_->setItem(row, 3, new QTableWidgetItem(q(service_->user(value->uploaderId()).fullName())));
             filesTable_->setItem(row, 4, new QTableWidgetItem(q(value->dateShared())));
-            filesTable_->setItem(row, 5, new QTableWidgetItem(QString::number(value->recordedSize()) + " bytes"));
+            filesTable_->setItem(row, 5, new QTableWidgetItem(QLocale().formattedDataSize(static_cast<qint64>(value->recordedSize()))));
             filesTable_->setItem(row, 6, new QTableWidgetItem(value->exists() ? "Yes" : "Missing"));
         }
     });
@@ -2157,7 +2738,9 @@ void TeamSyncGui::refreshNotifications() {
             notificationsTable_->setItem(row, 2, new QTableWidgetItem(q(value->dateTime())));
             if (!value->isRead()) {
                 for (int column = 0; column < notificationsTable_->columnCount(); ++column) {
-                    notificationsTable_->item(row, column)->setForeground(QColor("#9ee8ff"));
+                    auto font = notificationsTable_->item(row, column)->font();
+                    font.setWeight(QFont::DemiBold);
+                    notificationsTable_->item(row, column)->setFont(font);
                 }
             }
         }
@@ -2172,7 +2755,8 @@ void TeamSyncGui::updateNotificationButton() {
             if (notice.userId() == currentUser_->id() && !notice.isRead()) ++unread;
         }
     }
-    notificationButton_->setText(unread > 0 ? QString::number(unread) : QString{});
+    notificationButton_->setText({});
+    if (auto* dot = notificationButton_->findChild<QLabel*>("notificationDot")) dot->setVisible(unread > 0);
     notificationButton_->setToolTip(unread > 0
         ? QString("%1 unread notification(s)").arg(unread)
         : "No unread notifications");
@@ -2286,20 +2870,31 @@ void TeamSyncGui::showTeamDetails() {
         auto* actions = new QHBoxLayout;
         auto* copyCode = button("Copy join code");
         actions->addWidget(copyCode);
-        connect(copyCode, &QPushButton::clicked, &dialog, [&] {
-            QApplication::clipboard()->setText(q(selected.joinCode()));
+        const QString codeToCopy = q(selected.joinCode());
+        connect(copyCode, &QPushButton::clicked, &dialog, [this, codeToCopy] {
+            QApplication::clipboard()->setText(codeToCopy);
             showStatus("Join code copied");
         });
         if (selected.isAdmin(currentUserId())) {
             auto* promote = button("Promote member");
+            auto* demote = button("Change to member");
             auto* remove = button("Remove member");
             remove->setObjectName("dangerButton");
             actions->addWidget(promote);
+            actions->addWidget(demote);
             actions->addWidget(remove);
             connect(promote, &QPushButton::clicked, &dialog, [&] {
                 const int memberId = selectedId(members);
                 if (memberId > 0 && perform([&] { service_->promoteMember(currentUserId(), teamId, memberId); },
                                               "Member promoted")) dialog.accept();
+            });
+            connect(demote, &QPushButton::clicked, &dialog, [&] {
+                const int memberId = selectedId(members);
+                if (memberId <= 0) return;
+                if (QMessageBox::question(&dialog, "Change team role",
+                        "Change the selected team admin back to a regular member?") == QMessageBox::Yes &&
+                    perform([&] { service_->demoteMember(currentUserId(), teamId, memberId); },
+                            "Member role updated")) dialog.accept();
             });
             connect(remove, &QPushButton::clicked, &dialog, [&] {
                 const int memberId = selectedId(members);
@@ -2519,17 +3114,32 @@ void TeamSyncGui::completeSelectedTask() {
     note->setMaximumHeight(150);
     layout->addWidget(note);
     auto* files = new QListWidget;
-    files->addItem("No files selected.");
+    files->setObjectName("completionFiles");
     layout->addWidget(files, 1);
     auto* choose = button("Add files...");
     layout->addWidget(choose, 0, Qt::AlignLeft);
-    QStringList selectedFiles;
+    QStringList selectedFiles = pendingTaskFiles_;
+    pendingTaskFiles_.clear();
+    const auto updateFiles = [&] {
+        files->clear();
+        if (selectedFiles.empty()) files->addItem("Drop files here or choose Add files.");
+        else for (const auto& path : selectedFiles) files->addItem(path);
+    };
+    updateFiles();
+    ui::acceptFileDrops(files->viewport(), [&](const QStringList& paths) {
+        for (const auto& path : paths) if (!selectedFiles.contains(path)) selectedFiles << path;
+        updateFiles();
+    });
+    auto* removeFile = button("Remove selected file");
+    layout->addWidget(removeFile, 0, Qt::AlignLeft);
+    connect(removeFile, &QPushButton::clicked, &dialog, [&] {
+        if (files->currentRow() >= 0 && files->currentRow() < selectedFiles.size()) selectedFiles.removeAt(files->currentRow());
+        updateFiles();
+    });
     connect(choose, &QPushButton::clicked, &dialog, [&] {
         const auto picked = QFileDialog::getOpenFileNames(&dialog, "Choose completion files");
         for (const auto& path : picked) if (!selectedFiles.contains(path)) selectedFiles.push_back(path);
-        files->clear();
-        if (selectedFiles.empty()) files->addItem("No files selected.");
-        else for (const auto& path : selectedFiles) files->addItem(path);
+        updateFiles();
     });
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok);
     buttons->button(QDialogButtonBox::Ok)->setText("Mark completed");
@@ -2538,7 +3148,7 @@ void TeamSyncGui::completeSelectedTask() {
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
         std::vector<std::filesystem::path> paths;
-        for (const auto& path : selectedFiles) paths.emplace_back(s(path));
+        for (const auto& path : selectedFiles) paths.emplace_back(path.toStdWString());
         if (perform([&] { service_->markTaskComplete(currentUserId(), taskId,
                                                      s(note->toPlainText()), paths); },
                     "Task marked complete")) dialog.accept();
@@ -2738,7 +3348,7 @@ void TeamSyncGui::shareFile() {
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
         if (perform([&] {
-                service_->shareFile(currentUserId(), teamId, std::filesystem::path(s(path)),
+                service_->shareFile(currentUserId(), teamId, std::filesystem::path(path.toStdWString()),
                                    s(displayName->text()), s(description->text()));
             }, "File shared and ready to synchronize")) dialog.accept();
     });
@@ -2814,8 +3424,7 @@ void TeamSyncGui::saveProfile() {
     if (perform([this, &skills] {
             service_->editProfile(currentUserId(), s(profileName_->text()), s(profileEmail_->text()), skills);
         }, "Profile updated")) {
-        signedInUser_->setText("<b>" + q(currentUser_->fullName()).toHtmlEscaped() + "</b><br>" +
-                               q(currentUser_->username()).toHtmlEscaped() + "  •  " + q(toString(currentUser_->role())));
+        refreshSessionUi(false);
         refreshProfile();
     }
 }
@@ -2846,7 +3455,14 @@ void TeamSyncGui::showChangePasswordDialog() {
         if (perform([&] {
                 service_->changePassword(currentUserId(), s(current->text()), s(replacement->text()),
                                         s(confirmation->text()));
-            }, "Password changed")) dialog.accept();
+            }, "Password changed")) {
+            sessionPassword_ = replacement->text();
+            auto settings = appSettings();
+            if (!guestSession_ && settings.value("session/username").toString() == q(currentUser_->username())) {
+                rememberLogin(q(currentUser_->username()), replacement->text());
+            }
+            dialog.accept();
+        }
     });
     dialog.exec();
 }

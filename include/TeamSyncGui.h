@@ -4,13 +4,16 @@
 
 #include <QMainWindow>
 #include <QString>
+#include <QStringList>
 
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <thread>
 #include <vector>
 
 class QComboBox;
+class QCheckBox;
 class QDialog;
 class QEvent;
 class QLabel;
@@ -19,6 +22,10 @@ class QListWidget;
 class QPushButton;
 class QStackedWidget;
 class QTableWidget;
+class QTableView;
+class QStandardItemModel;
+class QVBoxLayout;
+class QToolButton;
 class QTextEdit;
 class QWidget;
 class QResizeEvent;
@@ -26,6 +33,7 @@ class QResizeEvent;
 namespace teamsync {
 
 class LanSyncManager;
+namespace ui { class TaskBoardWidget; }
 
 struct LanLaunchOptions {
     enum class Mode { Local, Host, Client };
@@ -54,6 +62,7 @@ private:
         ConnectionPage,
         TutorialPage,
         ProfilePage,
+        SettingsPage,
         PageCount
     };
 
@@ -64,6 +73,11 @@ private:
     LanLaunchOptions networkOptions_;
     QString networkStartupError_;
     bool networkOnline_ = true;
+    bool guestSession_ = false;
+    bool networkBusy_ = false;
+    bool operationInProgress_ = false;
+    bool popupAnimations_ = true;
+    QString sessionPassword_;
     QString lastNetworkError_;
     User* currentUser_ = nullptr;
 
@@ -84,6 +98,11 @@ private:
     QPushButton* floatingChatButton_ = nullptr;
     QPushButton* authThemeButton_ = nullptr;
     QPushButton* shellThemeButton_ = nullptr;
+    QPushButton* connectionBadge_ = nullptr;
+    QPushButton* pageHeaderAction_ = nullptr;
+    QLineEdit* globalSearch_ = nullptr;
+    QWidget* navigationIndicator_ = nullptr;
+    QToolButton* profileChevron_ = nullptr;
     QDialog* chatDialog_ = nullptr;
     QDialog* notificationsDialog_ = nullptr;
     bool darkTheme_ = true;
@@ -91,11 +110,26 @@ private:
 
     QLineEdit* loginUsername_ = nullptr;
     QLineEdit* loginPassword_ = nullptr;
+    QCheckBox* rememberLogin_ = nullptr;
+    QComboBox* themeChoice_ = nullptr;
 
     std::vector<QLabel*> dashboardValues_;
     QLabel* dashboardStatusSummary_ = nullptr;
     QListWidget* recentMessages_ = nullptr;
     QListWidget* recentActivities_ = nullptr;
+    QLabel* dashboardWelcome_ = nullptr;
+    QLabel* dashboardEmpty_ = nullptr;
+    QWidget* dashboardMetrics_ = nullptr;
+    QWidget* dashboardWork_ = nullptr;
+    QTableView* myTasksView_ = nullptr;
+    QStandardItemModel* myTasksModel_ = nullptr;
+    QTableView* overviewProjectsView_ = nullptr;
+    QStandardItemModel* overviewProjectsModel_ = nullptr;
+    QVBoxLayout* projectRows_ = nullptr;
+    QVBoxLayout* activityRows_ = nullptr;
+    QVBoxLayout* updateRows_ = nullptr;
+    std::vector<QLabel*> dashboardTrends_;
+    int selectedOverviewProject_ = 0;
 
     QLineEdit* teamSearch_ = nullptr;
     QTableWidget* teamsTable_ = nullptr;
@@ -104,6 +138,9 @@ private:
     QLineEdit* taskSearch_ = nullptr;
     QComboBox* taskFilter_ = nullptr;
     QTableWidget* tasksTable_ = nullptr;
+    QStringList pendingTaskFiles_;
+    QStackedWidget* taskViews_ = nullptr;
+    ui::TaskBoardWidget* taskBoard_ = nullptr;
 
     QComboBox* chatTeam_ = nullptr;
     QListWidget* chatMessages_ = nullptr;
@@ -141,19 +178,35 @@ private:
     QWidget* buildConnectionPage();
     QWidget* buildTutorialPage();
     QWidget* buildProfilePage();
+    QWidget* buildSettingsPage();
 
     void attemptLogin();
+    void attemptRememberedLogin();
+    void finishLogin(bool rememberLogin);
+    void rememberLogin(const QString& username, const QString& password);
+    void clearRememberedLogin();
+    void showGuestDialog();
     void showRegistrationDialog();
     void showForgotPasswordDialog();
     void showTutorialAndCreditsDialog();
     void showSecurityQuestionsDialog();
     void logout();
     void navigateTo(Page page);
+    void showGlobalSearch();
     void animatePage(QWidget* page);
     void animateWindowIn();
     void animatePopup(QDialog* dialog);
     void applyTheme(bool dark);
     void toggleTheme();
+    void refreshSessionUi(bool refreshPage = true);
+    bool runNetworkOperation(const std::function<bool()>& action, const QString& message,
+                             LanSyncManager* operationManager = nullptr);
+    void showTransferCenter();
+    void showRecoveryDialog();
+    void shareDroppedFiles(const QStringList& files);
+    bool remoteReloadPending_ = false;
+    bool backgroundSync_ = false;
+    std::thread backupWorker_;
 
     void refreshCurrentPage();
     void refreshDashboard();
@@ -211,9 +264,6 @@ private:
     int currentUserId() const;
     void showStatus(const QString& message, bool success = true);
 
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override;
-    void resizeEvent(QResizeEvent* event) override;
 };
 
 } // namespace teamsync

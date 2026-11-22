@@ -14,3 +14,9 @@
 /task_attachments/
 /shared_files_storage/
 /network_cache/
+# Local recovery, partial transfers and protected console sessions.
+.teamsync/
+.teamsync-recovery/
+.teamsync-console-cache/
+.teamsync-console-session*
+.teamsync-console-no-remember

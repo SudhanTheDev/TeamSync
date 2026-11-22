@@ -22,7 +22,9 @@ Student groups need one local place to divide work, see deadlines, communicate, 
 - `TeamSyncService`: owns records and implements authorization/use cases.
 - `Dashboard` and `ReportGenerator`: read models and formatted output.
 - `TeamSyncApplication`: console menus only.
-- `LanSyncManager`: Qt TCP host/client snapshot synchronization for a trusted local network.
+- `ConsoleLanSync`: shared native host/client engine used by both the GUI adapter and console interface.
+- `WorkspaceRecovery`: validated local backup, conflict-copy, and restore operations.
+- `TaskBoardWidget`: GUI board view that delegates task transitions and completion actions to the existing service.
 
 ## Relationships and why they were chosen
 
@@ -145,7 +147,7 @@ The dashboard presents personal task-status counts, joined projects/teams, unrea
 
 ## Limitations
 
-LAN collaboration is GUI-only and requires the host to stay open. The educational TCP pairing protocol is intended only for trusted private Wi-Fi/hotspots and is not internet-grade encrypted. Chat opens from the floating bottom-right button; notices open from the top-right bell. Local password recovery compares three hashed answers and does not send mail. Other limitations include refresh-based messages/notices, educational hashing, day-only dates, and estimated scoring. Non-Windows builds do not launch shared files because constructing a shell command from an arbitrary path would be unsafe.
+LAN collaboration is available in both GUI and console. Both use the same versioned `TEAMSYNC/3` engine and require the host to stay open. The transport is intended only for trusted private Wi-Fi/hotspots and is not encrypted with TLS. A client keeps offline changes queued and requires explicit conflict resolution rather than silent merging. Local password recovery compares three hashed answers and does not send mail. Other limitations include day-only dates and estimated contribution scoring. Non-Windows builds do not launch shared files because constructing a shell command from an arbitrary path would be unsafe.
 
 ## Future scope
 

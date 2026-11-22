@@ -15,6 +15,9 @@ public:
     void setDashboardAvailable(bool available) noexcept { dashboardAvailable_ = available; }
 
     std::string line(const std::string& prompt, bool allowEmpty = false);
+    // Interactive terminals hide input; redirected/scripted input keeps the
+    // same parsing/navigation behavior without touching terminal settings.
+    std::string secretLine(const std::string& prompt, bool allowEmpty = false);
     int integer(const std::string& prompt, int minimum, int maximum);
     Date date(const std::string& prompt);
     bool yesNo(const std::string& prompt);

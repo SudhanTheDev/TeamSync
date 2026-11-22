@@ -1,6 +1,7 @@
 #include "Dashboard.h"
 #include "Exceptions.h"
 #include "Input.h"
+#include "ConsoleLanSync.h"
 #include "ReportGenerator.h"
 #include "TeamSyncApplication.h"
 #include "TeamSyncService.h"
@@ -13,6 +14,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -82,6 +84,23 @@ int main() {
     }
 
     TemporaryDirectory temporary;
+    {
+        FileManager storage(temporary.path / "workflow_persistence");
+        std::vector<std::unique_ptr<Task>> records;
+        records.push_back(std::make_unique<GeneralTask>(99010, 1, 1, "Past-due pending", "", 1, 1,
+            TaskPriority::Medium, TaskStatus::Pending, Date(1, 1, 1999), Date(1, 1, 2000),
+            std::nullopt, ""));
+        records.push_back(std::make_unique<GeneralTask>(99011, 1, 1, "Past-due in progress", "", 1, 1,
+            TaskPriority::Medium, TaskStatus::InProgress, Date(1, 1, 1999), Date(1, 1, 2000),
+            std::nullopt, ""));
+        storage.saveTasks(records);
+        const auto reloaded = storage.loadTasks();
+        assert(reloaded.size() == 2);
+        assert(reloaded[0]->status() == TaskStatus::Overdue);
+        assert(reloaded[0]->workflowStatus() == TaskStatus::Pending);
+        assert(reloaded[1]->status() == TaskStatus::Overdue);
+        assert(reloaded[1]->workflowStatus() == TaskStatus::InProgress);
+    }
     int adminId = 0;
     int memberId = 0;
     int teamId = 0;
@@ -112,6 +131,10 @@ int main() {
                                  UserRole::TeamMember, {}, {});
         });
         expectThrows<AuthenticationError>([&] { service.login("admin", "wrong"); });
+        expectThrows<AuthenticationError>([&] {
+            service.resetPassword("missing_user", {"One", "Two", "Three"},
+                                  "recovered", "recovered");
+        });
         assert(service.login("admin", "pass123").id() == adminId);
         expectThrows<AuthenticationError>([&] {
             service.resetPassword("member", {"Wrong", "Mimi", "Pokhara"},
@@ -127,6 +150,13 @@ int main() {
         const std::string joinCode = parent.joinCode();
         service.joinTeam(memberId, joinCode);
         service.joinTeam(collaboratorId, joinCode);
+        assert(!service.team(teamId).isAdmin(memberId));
+        service.promoteMember(adminId, teamId, memberId);
+        assert(service.team(teamId).isAdmin(memberId));
+        service.demoteMember(adminId, teamId, memberId);
+        assert(!service.team(teamId).isAdmin(memberId));
+        expectThrows<ValidationError>([&] { service.demoteMember(adminId, teamId, adminId); });
+        expectThrows<ValidationError>([&] { service.leaveTeam(adminId, teamId); });
         expectThrows<ValidationError>([&] { service.joinTeam(memberId, joinCode); });
         expectThrows<AuthorizationError>([&] {
             service.createProject(memberId, teamId, "Forbidden", "", Date::today(),
@@ -263,7 +293,7 @@ int main() {
 
     {
         std::istringstream scriptedInput(
-            "2\nadmin\npass123\n3\nback\ndashboard\n11\n4\n");
+            "2\nadmin\npass123\n3\nback\ndashboard\n12\n6\n");
         std::ostringstream capturedOutput;
         TeamSyncApplication application(temporary.path, scriptedInput, capturedOutput);
         assert(application.run() == 0);
@@ -271,6 +301,42 @@ int main() {
         assert(text.find("Returned to the dashboard") != std::string::npos);
         assert(text.find("--- Dashboard ---") != std::string::npos);
         assert(text.find("TeamSync closed safely") != std::string::npos);
+    }
+
+    {
+        std::istringstream scriptedInput("3\nmissing_user\n6\n");
+        std::ostringstream capturedOutput;
+        TeamSyncApplication application(temporary.path, scriptedInput, capturedOutput);
+        assert(application.run() == 0);
+        const auto text = capturedOutput.str();
+        assert(text.find("No account exists with that username") != std::string::npos);
+        assert(text.find("What was the name of your first school?") == std::string::npos);
+    }
+
+    {
+        const auto hostRoot = temporary.path / "console_lan_host";
+        const auto clientRoot = temporary.path / "console_lan_client";
+        std::filesystem::create_directories(hostRoot / "data");
+        std::ofstream(hostRoot / "data" / "workspace.dat") << "host version\n";
+        ConsoleLanSync host(hostRoot);
+        ConsoleLanSync client(clientRoot);
+        std::string code, error;
+        assert(host.host(47555, code, error));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const bool joined = client.join("127.0.0.1", 47555, code, error);
+        if (!joined) std::cerr << "Console LAN join error: " << error << '\n';
+        assert(joined);
+        std::ifstream initial(clientRoot / "data" / "workspace.dat");
+        std::string value;
+        std::getline(initial, value);
+        assert(value == "host version");
+        std::ofstream(clientRoot / "data" / "workspace.dat", std::ios::trunc) << "client update\n";
+        bool changed = false;
+        assert(client.sync(changed, error));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::ifstream updated(hostRoot / "data" / "workspace.dat");
+        std::getline(updated, value);
+        assert(value == "client update");
     }
 
     std::cout << "All TeamSync tests passed.\n";

@@ -292,7 +292,7 @@ void FileManager::saveTasks(const std::vector<std::unique_ptr<Task>>& records) c
         std::to_string(value->id()), std::to_string(value->projectId()),
         std::to_string(value->teamId()), field(value->title()), field(value->description()),
         std::to_string(value->createdBy()), std::to_string(value->assignedUserId()),
-        field(toString(value->priority())), field(toString(value->status())),
+        field(toString(value->priority())), field(toString(value->workflowStatus())),
         value->creationDate().toString(), value->dueDate().toString(),
         value->completionDate() ? value->completionDate()->toString() : "",
         field(value->requiredSkill()), util::join(value->comments(), ';'),

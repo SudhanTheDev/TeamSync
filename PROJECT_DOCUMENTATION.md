@@ -10,9 +10,9 @@
 
 ![C++](https://img.shields.io/badge/C%2B%2B-17%2F20-blue?logo=cplusplus)
 ![OOP](https://img.shields.io/badge/Concept-Object--Oriented%20Programming-purple)
-![Status](https://img.shields.io/badge/Status-In%20Development-orange)
+![Status](https://img.shields.io/badge/Status-Implemented-10B981)
 ![Platform](https://img.shields.io/badge/Platform-Desktop-lightgrey)
-![License](https://img.shields.io/badge/License-MIT-green)
+![License](https://img.shields.io/badge/License-Limited%20Use-purple)
 
 </div>
 
@@ -20,11 +20,11 @@
 
 ## About the Project
 
-TeamSync is a local team collaboration and task management application developed entirely in C++.
+TeamSync is a local team collaboration and task management application developed in C++17. The current Windows build includes a Qt 6 GUI and a console interface. Both share the native LAN synchronization engine and workspace format. See the [current README](README.md), [v1.1.0 release notes](docs/release-notes/v1.1.0.md), and [reliability guide](docs/RELIABILITY_AND_CONSOLE.md) for current behavior.
 
 It is designed for student groups, project teams, clubs, and small organizations that need a simple way to manage teamwork without depending on cloud services.
 
-The system allows users to create teams, organize projects, assign tasks, send team messages, share file information, track progress, and generate reports.
+The system allows users to create teams, organize projects, assign and complete status-based tasks, send team messages, copy/share files, collaborate across computers on a trusted LAN, recover from offline conflicts, and generate reports.
 
 This project was developed as a second-semester Object-Oriented Programming project.
 
@@ -165,4 +165,5 @@ TeamSync is **source-available, not open source**. You may clone, compile, and
 run an unchanged copy solely for personal or educational, non-commercial use.
 Modification, derivative works, redistribution, sublicensing, and commercial
 use are prohibited without prior written permission. See [LICENSE](LICENSE) for
-the complete terms.
+the complete terms. Third-party components keep their own license terms; see
+[third-party notices](docs/THIRD_PARTY_NOTICES.md).

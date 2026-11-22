@@ -5,25 +5,31 @@
 The architecture separates input/output, business rules, domain objects, and persistence while avoiding advanced frameworks. A viva explanation can follow one operation from the menu to the service, then to a model and `FileManager`.
 
 ```text
-Console input/output
-        |
-TeamSyncApplication + Input
-        |
-TeamSyncService -------- Dashboard / ReportGenerator
-        |
-Domain objects (User, Team, Project, Task, Message, ...)
-        |
-FileManager -> data/*.dat and reports/*.txt
+Qt Widgets GUI (TeamSyncGui)          Console menus (TeamSyncApplication)
+                \                    /
+                 TeamSyncService + Input
+                           |
+       Domain objects + FileManager + WorkspaceRecovery
+                           |
+         data/*.dat, attachments, shared file copies
+
+Qt LanSyncManager adapter ----\
+                              +---- ConsoleLanSync / TEAMSYNC/3
+Console interface ------------/
 ```
 
 ## Responsibilities
 
-- `TeamSyncApplication`: menu loops and user-facing confirmations; it does not own business data.
+- `TeamSyncApplication`: console menu loops and user-facing confirmations; it does not own business data.
+- `TeamSyncGui`: Qt Widgets pages, dialogs, task board, preferences, and desktop interactions. It delegates application operations to `TeamSyncService`.
 - `Input`: reusable validated lines, integers, dates, lists, and yes/no answers.
 - `TeamSyncService`: the application use cases and authorization boundary. It owns record collections and saves after changes.
 - `Authentication`: username/password validation, registration, login, profile editing, password changes, and three-question hashed recovery.
 - Domain classes: protect their own invariants, such as a non-empty team name, real date, controlled task-status transitions, safe attachment paths, or at least one team admin.
 - `FileManager`: the only class that knows data-file formats.
+- `WorkspaceRecovery`: creates validated local snapshots and performs guarded full-workspace restores.
+- `ConsoleLanSync`: shared platform-native host/client transport for both interfaces. It streams only managed changed files, verifies content, preserves pending work, and applies revision-checked transactions.
+- `LanSyncManager`: Qt type adapter around `ConsoleLanSync`; the GUI does not use a separate wire protocol.
 - `Dashboard`: calculates a read-only summary for one user.
 - `ReportGenerator`: formats and exports the eight report types.
 
@@ -61,6 +67,8 @@ Load sequence:
 
 Team membership is checked for viewing team projects, tasks, chat, files, activity, and reports. A team admin is required to create/edit/archive projects, create/edit/delete/assign tasks, remove members, or promote members. Any member of the task's team can start, complete, reopen, comment, and attach completion evidence. Users can delete only their own messages and shared-file records.
 
-## Extension boundaries
+## LAN synchronization
 
-A future database-backed `FileManager`, network API, or GUI can call the same service methods. Real-time transports can deliver new messages/notifications without changing the `Message` and `Notification` entities. These extensions are intentionally not part of the first version.
+The host owns the shared workspace while it is online. Clients download it into an isolated local cache; local account/workspace folders are not silently replaced on a first join. Network operations avoid holding the workspace mutation lock while streaming, then recheck revisions and local fingerprints before committing. Offline edits remain pending for explicit retry. Conflicts are preserved as recovery snapshots rather than being automatically merged.
+
+The GUI and console share `TEAMSYNC/3`, chunked file transfer, checksum validation, discovery, and recovery behavior. It is intended for trusted LAN/Wi-Fi/hotspot use, not internet hosting; the current transport does not provide TLS.

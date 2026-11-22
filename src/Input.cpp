@@ -5,7 +5,55 @@
 
 #include <iostream>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+#endif
+
 namespace teamsync {
+namespace {
+class TerminalEchoGuard {
+public:
+    explicit TerminalEchoGuard(std::istream& input) {
+        if (&input != &std::cin) return;
+#ifdef _WIN32
+        handle_ = GetStdHandle(STD_INPUT_HANDLE);
+        if (handle_ != INVALID_HANDLE_VALUE && GetConsoleMode(handle_, &original_))
+            active_ = SetConsoleMode(handle_, original_ & ~ENABLE_ECHO_INPUT) != 0;
+#else
+        if (isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &original_) == 0) {
+            auto hidden = original_;
+            hidden.c_lflag &= static_cast<tcflag_t>(~(ECHO | ECHONL));
+            active_ = tcsetattr(STDIN_FILENO, TCSANOW, &hidden) == 0;
+        }
+#endif
+    }
+    ~TerminalEchoGuard() {
+        if (!active_) return;
+#ifdef _WIN32
+        SetConsoleMode(handle_, original_);
+#else
+        tcsetattr(STDIN_FILENO, TCSANOW, &original_);
+#endif
+    }
+    TerminalEchoGuard(const TerminalEchoGuard&) = delete;
+    TerminalEchoGuard& operator=(const TerminalEchoGuard&) = delete;
+    bool active() const { return active_; }
+private:
+    bool active_ = false;
+#ifdef _WIN32
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    DWORD original_ = 0;
+#else
+    termios original_{};
+#endif
+};
+} // namespace
 
 void Input::showNavigationHint() const {
     out_ << (dashboardAvailable_ ? "[B=Back | D=Dashboard] " : "[B=Back] ");
@@ -31,6 +79,24 @@ std::string Input::line(const std::string& prompt, const bool allowEmpty) {
         std::string value;
         if (!std::getline(in_, value)) throw TeamSyncError("Input stream was closed.");
         value = util::trim(value);
+        if (handleNavigation(value)) continue;
+        if (allowEmpty || !value.empty()) return value;
+        out_ << "Input cannot be empty. Please try again.\n";
+    }
+}
+
+std::string Input::secretLine(const std::string& prompt, const bool allowEmpty) {
+    TerminalEchoGuard echo(in_); // Restores original mode on Back/Dashboard/EOF too.
+    while (true) {
+        out_ << prompt;
+        showNavigationHint();
+        out_ << std::flush;
+        std::string value;
+        const bool read = static_cast<bool>(std::getline(in_, value));
+        if (echo.active()) out_ << '\n';
+        if (!read) throw TeamSyncError("Input stream was closed.");
+        // Passwords may legitimately contain leading/trailing spaces. The GUI
+        // passes them unchanged; console authentication must do the same.
         if (handleNavigation(value)) continue;
         if (allowEmpty || !value.empty()) return value;
         out_ << "Input cannot be empty. Please try again.\n";

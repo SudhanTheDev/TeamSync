@@ -1,5 +1,20 @@
 # Testing Guide
 
+The collaboration/recovery upgrade adds `RecoveryConsoleTests`, `SharedSyncTests`,
+`TaskBoardTests`, and `GuiConsoleInteropTests` alongside the original service suite.
+All create isolated temporary workspaces. Qt board tests use the offscreen platform.
+See [reliability and console notes](RELIABILITY_AND_CONSOLE.md) for the behavior,
+limits, and migration requirements. Assertions remain enabled for test targets
+even in Release builds.
+
+Release verification on 22 November 2026 completed a clean Windows x64 Release
+build and passed all five CTest suites: `TeamSyncTests`, `RecoveryConsoleTests`,
+`SharedSyncTests`, `TaskBoardTests`, and `GuiConsoleInteropTests`. The network
+tests use loopback; they do not replace a real two-computer Wi-Fi/hotspot test.
+Earlier GUI workflow, navigation, recovery, role-permission, sign-in stress,
+and light/dark task-board checks are recorded in the reliability notes linked
+above.
+
 ## Automated tests
 
 `tests/teamsync_tests.cpp` is a C++ integration executable. It creates a uniquely named temporary directory, exercises the service and persistence layers, reloads the records, appends one corrupt line, verifies recovery, and removes only its own temporary directory.
@@ -37,9 +52,9 @@ ctest --test-dir build --output-on-failure
 | TASK-03 | Start work | Assignee selects Start task | Status becomes In Progress and activity is logged |
 | TASK-04 | Completion | Any member of the task's team adds optional content/files and marks it complete | Completion date, Completed status, content/files, and creator notification persist |
 | TASK-05 | Role-independent work | A regular team member starts/completes a task assigned to another member | Status update succeeds because team membership, not account role, controls task work |
-| TASK-05 | Reopen | Assignee reopens completed task | Status becomes Pending and current completion content is cleared |
-| TASK-06 | Invalid ID | Enter an unknown task/project/team/user ID | Clear not-found error; menu continues |
-| TASK-07 | Sorting | Sort accessible tasks by priority, due date, status | Rows appear in selected order |
+| TASK-06 | Reopen | Assignee reopens completed task | Status becomes Pending and current completion content is cleared |
+| TASK-07 | Invalid ID | Enter an unknown task/project/team/user ID | Clear not-found error; menu continues |
+| TASK-08 | Sorting | Sort accessible tasks by priority, due date, status | Rows appear in selected order |
 | REC-01 | Recommendation | Request recommendation for a task with `C++` skill | Team members are ranked with visible rule-based factors |
 | CHAT-01 | Message history | Member sends message, restarts, opens team chat | Sender, timestamp, and original message are restored |
 | CHAT-02 | Delete ownership | Try to delete another member's message | Authorization error |

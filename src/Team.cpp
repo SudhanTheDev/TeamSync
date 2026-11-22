@@ -54,6 +54,9 @@ void Team::addMember(const int userId) {
 
 void Team::removeMember(const int userId) {
     if (!hasMember(userId)) throw NotFoundError("User is not a member of this team.");
+    if (userId == creatorId_) {
+        throw ValidationError("The team creator must remain an admin of this team.");
+    }
     if (isAdmin(userId) && adminIds_.size() == 1) {
         throw ValidationError("A team must always have at least one admin.");
     }
@@ -68,6 +71,9 @@ void Team::addAdmin(const int userId) {
 
 void Team::removeAdmin(const int userId) {
     if (!isAdmin(userId)) return;
+    if (userId == creatorId_) {
+        throw ValidationError("The team creator must remain an admin of this team.");
+    }
     if (adminIds_.size() == 1) throw ValidationError("A team must always have at least one admin.");
     adminIds_.erase(std::remove(adminIds_.begin(), adminIds_.end(), userId), adminIds_.end());
 }

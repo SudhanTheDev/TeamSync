@@ -39,6 +39,8 @@ public:
     int assignedUserId() const { return assignedUserId_; }
     TaskPriority priority() const { return priority_; }
     TaskStatus status() const;
+    // Unlike the derived Overdue display state, this preserves the actual board column.
+    TaskStatus workflowStatus() const { return status_; }
     const Date& creationDate() const { return creationDate_; }
     const Date& dueDate() const { return dueDate_; }
     const std::optional<Date>& completionDate() const { return completionDate_; }

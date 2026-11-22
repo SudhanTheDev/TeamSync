@@ -1,4 +1,5 @@
 #include "TeamSyncService.h"
+#include "FileTransferPolicy.h"
 
 #include "Exceptions.h"
 #include "Utils.h"
@@ -239,6 +240,17 @@ void TeamSyncService::promoteMember(const int actingUserId, const int teamId, co
     fileManager_.saveActivities(activities_);
 }
 
+void TeamSyncService::demoteMember(const int actingUserId, const int teamId, const int memberId) {
+    requireTeamAdmin(actingUserId, teamId);
+    auto& value = team(teamId);
+    value.removeAdmin(memberId);
+    addNotification(memberId, "You are now a member of team " + value.name() + '.');
+    log(actingUserId, teamId, "Changed team role for member " + std::to_string(memberId) + " to member");
+    fileManager_.saveTeams(teams_);
+    fileManager_.saveNotifications(notifications_);
+    fileManager_.saveActivities(activities_);
+}
+
 Team& TeamSyncService::team(const int id) {
     const auto found = std::find_if(teams_.begin(), teams_.end(),
                                     [id](const Team& value) { return value.id() == id; });
@@ -437,8 +449,8 @@ void TeamSyncService::markTaskComplete(const int actingUserId, const int taskId,
     auto& value = searchTask(taskId);
     if (!canUpdateTask(actingUserId, value)) throw AuthorizationError("Only members of this team may complete this task.");
 
-    constexpr std::uintmax_t maxAttachmentSize = 100ULL * 1024ULL * 1024ULL;
-    constexpr std::uintmax_t maxAttachmentBatchSize = 150ULL * 1024ULL * 1024ULL;
+    constexpr std::uintmax_t maxAttachmentSize = maxManagedFileBytes;
+    constexpr std::uintmax_t maxAttachmentBatchSize = maxCompletionBatchBytes;
     struct PreparedFile { std::filesystem::path source; std::string name; std::uintmax_t size; };
     std::vector<PreparedFile> prepared;
     std::uintmax_t totalAttachmentSize = 0;
@@ -450,12 +462,12 @@ void TeamSyncService::markTaskComplete(const int actingUserId, const int taskId,
         }
         const auto size = std::filesystem::file_size(source, error);
         if (error) throw ValidationError("A selected completion file could not be read: " + source.string());
-        if (size > maxAttachmentSize) throw ValidationError("Completion files must be 100 MB or smaller: " + source.filename().string());
+        if (size > maxAttachmentSize) throw ValidationError("Completion files must be 2 GiB or smaller: " + source.filename().u8string());
         totalAttachmentSize += size;
         if (totalAttachmentSize > maxAttachmentBatchSize) {
-            throw ValidationError("Completion files must total 150 MB or less for reliable LAN synchronization.");
+            throw ValidationError("Completion files must total 4 GiB or less in one submission.");
         }
-        prepared.push_back({source, source.filename().string(), size});
+        prepared.push_back({source, source.filename().u8string(), size});
     }
 
     std::vector<std::filesystem::path> copied;
@@ -668,12 +680,12 @@ SharedFile& TeamSyncService::shareFile(const int uploaderId, const int teamId,
     if (error) throw ValidationError("The file path could not be resolved.");
     const auto size = std::filesystem::file_size(absolutePath, error);
     if (error) throw ValidationError("The file size could not be read.");
-    if (size > 150ULL * 1024ULL * 1024ULL) {
-        throw ValidationError("Shared files must be 150 MB or smaller for reliable LAN synchronization.");
+    if (size > maxManagedFileBytes) {
+        throw ValidationError("Shared files must be 2 GiB or smaller.");
     }
     const int id = SharedFile::generateId();
     const auto relative = std::filesystem::path("shared_files_storage") /
-                          (std::to_string(id) + "_" + safeAttachmentName(absolutePath.filename().string()));
+                          (std::to_string(id) + "_" + safeAttachmentName(absolutePath.filename().u8string()));
     const auto storedPath = fileManager_.root() / relative;
     std::filesystem::create_directories(storedPath.parent_path(), error);
     if (error) throw PersistenceError("Cannot create the shared-file storage folder: " + error.message());
@@ -681,7 +693,7 @@ SharedFile& TeamSyncService::shareFile(const int uploaderId, const int teamId,
                                std::filesystem::copy_options::overwrite_existing, error);
     if (error) throw PersistenceError("Cannot copy the shared file into TeamSync: " + error.message());
     sharedFiles_.emplace_back(id, teamId, uploaderId,
-        util::trim(displayName).empty() ? absolutePath.filename().string() : displayName,
+        util::trim(displayName).empty() ? absolutePath.filename().u8string() : displayName,
         storedPath, description, util::timestampNow(), size);
     for (const int memberId : team(teamId).memberIds()) if (memberId != uploaderId) {
         addNotification(memberId, "A new file was shared with team " + team(teamId).name() + ": " +

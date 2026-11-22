@@ -5,7 +5,24 @@
 #include <iostream>
 #include <string>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+namespace {
+struct ConsoleEncoding {
+    UINT input = GetConsoleCP(), output = GetConsoleOutputCP();
+    ConsoleEncoding() { if (input) SetConsoleCP(CP_UTF8); if (output) SetConsoleOutputCP(CP_UTF8); }
+    ~ConsoleEncoding() { if (input) SetConsoleCP(input); if (output) SetConsoleOutputCP(output); }
+};
+}
+#endif
+
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    ConsoleEncoding encoding;
+#endif
     try {
         std::filesystem::path root = ".";
         for (int i = 1; i < argc; ++i) {

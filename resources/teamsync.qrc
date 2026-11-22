@@ -1,0 +1,44 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file alias="overview.svg">icons/overview.svg</file>
+    <file alias="teams.svg">icons/teams.svg</file>
+    <file alias="projects.svg">icons/projects.svg</file>
+    <file alias="tasks.svg">icons/tasks.svg</file>
+    <file alias="files.svg">icons/files.svg</file>
+    <file alias="reports.svg">icons/reports.svg</file>
+    <file alias="activity.svg">icons/activity.svg</file>
+    <file alias="connection.svg">icons/connection.svg</file>
+    <file alias="user.svg">icons/user.svg</file>
+    <file alias="settings.svg">icons/settings.svg</file>
+    <file alias="help.svg">icons/help.svg</file>
+    <file alias="logout.svg">icons/logout.svg</file>
+    <file alias="sun.svg">icons/sun.svg</file>
+    <file alias="moon.svg">icons/moon.svg</file>
+    <file alias="monitor.svg">icons/monitor.svg</file>
+    <file alias="refresh.svg">icons/refresh.svg</file>
+    <file alias="plus.svg">icons/plus.svg</file>
+    <file alias="search.svg">icons/search.svg</file>
+    <file alias="chat.svg">icons/chat.svg</file>
+    <file alias="bell.svg">icons/bell.svg</file>
+    <file alias="chevron-right.svg">icons/chevron-right.svg</file>
+    <file alias="chevron-down.svg">icons/chevron-down.svg</file>
+    <file alias="arrow-left.svg">icons/arrow-left.svg</file>
+    <file alias="copy.svg">icons/copy.svg</file>
+    <file alias="host.svg">icons/host.svg</file>
+    <file alias="join.svg">icons/join.svg</file>
+    <file alias="check.svg">icons/check.svg</file>
+    <file alias="close.svg">icons/close.svg</file>
+    <file alias="folder.svg">icons/folder.svg</file>
+    <file alias="download.svg">icons/download.svg</file>
+    <file alias="eye.svg">icons/eye.svg</file>
+    <file alias="eye-off.svg">icons/eye-off.svg</file>
+    <file alias="lock.svg">icons/lock.svg</file>
+  </qresource>
+  <qresource prefix="/teamsync">
+    <file>app.svg</file>
+    <file>team-collaboration.svg</file>
+    <file>check-white.svg</file>
+    <file>LICENSE-Lucide.txt</file>
+    <file>ICON_ATTRIBUTION.md</file>
+  </qresource>
+</RCC>

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(TeamSync VERSION 1.0.1 LANGUAGES CXX)
+project(TeamSync VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,11 +22,13 @@ add_library(teamsync_core
     src/Notification.cpp
     src/ActivityLog.cpp
     src/FileManager.cpp
+    src/WorkspaceRecovery.cpp
     src/Authentication.cpp
     src/TeamSyncService.cpp
     src/Dashboard.cpp
     src/ReportGenerator.cpp
     src/Input.cpp
+    src/ConsoleLanSync.cpp
     src/TeamSyncApplication.cpp
 )
 target_include_directories(teamsync_core PUBLIC include)
@@ -46,19 +48,29 @@ if(MINGW)
 endif()
 
 if(WIN32)
-    target_link_libraries(teamsync_core PRIVATE shell32)
+    target_link_libraries(teamsync_core PRIVATE shell32 ws2_32 crypt32 user32)
 endif()
 
 if(TEAMSYNC_BUILD_GUI)
-    find_package(Qt6 COMPONENTS Widgets Network QUIET)
+    find_package(Qt6 COMPONENTS Widgets Network Svg QUIET)
     if(Qt6_FOUND)
         add_executable(teamsync_gui WIN32
             src/gui_main.cpp
             src/TeamSyncGui.cpp
+            src/TeamSyncGuiWorkPages.cpp
+            src/TeamSyncGuiReliability.cpp
+            src/TaskBoardWidget.cpp
+            src/PremiumWidgets.cpp
             src/LanSyncManager.cpp
+            src/ThemeManager.cpp
+            resources/teamsync.qrc
         )
-        target_link_libraries(teamsync_gui PRIVATE teamsync_core Qt6::Widgets Qt6::Network)
+        target_link_libraries(teamsync_gui PRIVATE teamsync_core Qt6::Widgets Qt6::Network Qt6::Svg)
+        if(WIN32)
+            target_link_libraries(teamsync_gui PRIVATE crypt32)
+        endif()
         set_target_properties(teamsync_gui PROPERTIES
+            AUTORCC ON
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gui"
         )
         if(MINGW)
@@ -89,4 +101,35 @@ if(TEAMSYNC_BUILD_TESTS)
         target_link_options(teamsync_tests PRIVATE -static -static-libgcc -static-libstdc++)
     endif()
     add_test(NAME TeamSyncTests COMMAND teamsync_tests)
+    add_executable(teamsync_recovery_tests tests/console_recovery_tests.cpp)
+    target_link_libraries(teamsync_recovery_tests PRIVATE teamsync_core)
+    add_test(NAME RecoveryConsoleTests COMMAND teamsync_recovery_tests)
+    add_executable(teamsync_sync_tests tests/sync_engine_tests.cpp)
+    target_link_libraries(teamsync_sync_tests PRIVATE teamsync_core)
+    add_test(NAME SharedSyncTests COMMAND teamsync_sync_tests)
+    if(TARGET teamsync_gui)
+        add_executable(teamsync_board_tests tests/task_board_tests.cpp src/TaskBoardWidget.cpp
+            src/PremiumWidgets.cpp src/ThemeManager.cpp resources/teamsync.qrc)
+        set_target_properties(teamsync_board_tests PROPERTIES AUTORCC ON RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gui")
+        target_link_libraries(teamsync_board_tests PRIVATE teamsync_core Qt6::Widgets Qt6::Svg)
+        add_test(NAME TaskBoardTests COMMAND teamsync_board_tests -platform offscreen)
+        set_tests_properties(TaskBoardTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM_PLUGIN_PATH=${QT_BIN_DIRECTORY}/../plugins/platforms")
+        add_executable(teamsync_interop_tests tests/lan_interop_tests.cpp src/LanSyncManager.cpp)
+        target_link_libraries(teamsync_interop_tests PRIVATE teamsync_core Qt6::Core Qt6::Network)
+        set_target_properties(teamsync_interop_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gui")
+        add_test(NAME GuiConsoleInteropTests COMMAND teamsync_interop_tests)
+    endif()
+    if(MINGW)
+        target_link_options(teamsync_recovery_tests PRIVATE -static -static-libgcc -static-libstdc++)
+        target_link_options(teamsync_sync_tests PRIVATE -static -static-libgcc -static-libstdc++)
+    endif()
+    foreach(TEAMSYNC_TEST_TARGET teamsync_tests teamsync_recovery_tests teamsync_sync_tests teamsync_board_tests teamsync_interop_tests)
+        if(TARGET ${TEAMSYNC_TEST_TARGET})
+            if(MSVC)
+                target_compile_options(${TEAMSYNC_TEST_TARGET} PRIVATE /UNDEBUG)
+            else()
+                target_compile_options(${TEAMSYNC_TEST_TARGET} PRIVATE -UNDEBUG)
+            endif()
+        endif()
+    endforeach()
 endif()

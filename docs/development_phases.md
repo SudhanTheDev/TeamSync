@@ -59,3 +59,9 @@ Verification performed with GCC 13.1 and CMake 3.30:
 - Executable smoke tests register ordinary test accounts, log in, display the dashboard, switch themes, log out, and verify persistence without shipping demonstration accounts.
 
 For repeatable verification, follow `docs/testing.md`.
+
+## Phase 8 — Desktop GUI, shared LAN, and recovery
+
+Completed the Qt 6 Widgets GUI redesign, light/dark themes, interactive task board, file drops, GUI/console shared LAN engine, chunked/resumable transfers, queued offline edits, explicit conflict handling, local backup/restore, and console workflow parity.
+
+The current release is v1.1.0. All five automated test targets and the isolated GUI workflow/recovery checks were verified before packaging. See `docs/release-notes/v1.1.0.md` for compatibility notes and `docs/RELIABILITY_AND_CONSOLE.md` for scope and limits.

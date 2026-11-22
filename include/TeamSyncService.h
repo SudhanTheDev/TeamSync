@@ -67,6 +67,7 @@ public:
     void leaveTeam(int userId, int teamId);
     void removeMember(int actingUserId, int teamId, int memberId);
     void promoteMember(int actingUserId, int teamId, int memberId);
+    void demoteMember(int actingUserId, int teamId, int memberId);
     Team& team(int id);
     const Team& team(int id) const;
     std::vector<Team*> teamsForUser(int userId);
