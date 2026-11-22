@@ -43,12 +43,12 @@ The GUI and console use the same native synchronization engine and workspace for
 
 ## Download and run
 
-1. Open [Releases](https://github.com/SudhanTheDev/TeamSync/releases/latest) and download the latest published Windows ZIP.
+1. Open [Releases](https://github.com/SudhanTheDev/TeamSync/releases/latest) and download **TeamSync-v1.1.0-Windows-x64.zip**.
 2. Extract the entire ZIP to a normal folder.
 3. Double-click **Run TeamSync.bat**.
 4. Choose GUI or console mode.
 
-No installer is included. The v1.1.0 source update is prepared and tested, but its Windows binary is not published yet while the Qt distribution license is being verified. Until then, the Releases page continues to provide the last published portable build. See [v1.1.0 release notes](docs/release-notes/v1.1.0.md) for details.
+No installer is included. The portable ZIP contains both interfaces, their runtime files, third-party notices, and the corresponding Qt source archives. See [v1.1.0 release notes](docs/release-notes/v1.1.0.md) for details.
 
 ### Before connecting multiple computers
 

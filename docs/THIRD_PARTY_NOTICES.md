@@ -4,7 +4,7 @@ TeamSync includes third-party components that retain their own licenses. These t
 
 ## Qt 6
 
-The Windows GUI dynamically links Qt 6.8.3 modules Qt Core, Gui, Widgets, Network, and Svg, and includes corresponding Qt platform/style/image plugins. Qt documents these modules as available under the LGPLv3 (or alternative licenses depending on the edition). The local SDK's license edition could not be confirmed from its installed metadata, so the v1.1.0 Windows binary is being held until this is verified.
+The Windows GUI dynamically links Qt 6.8.3 modules Qt Core, Gui, Widgets, Network, and Svg, and includes corresponding Qt platform/style/image plugins. This release uses the LGPLv3 option for these Qt modules. Their LGPL text and corresponding 6.8.3 source archives are included in the Windows ZIP under `THIRD_PARTY_NOTICES/` and `THIRD_PARTY_SOURCE_CODE/`.
 
 Qt licensing overview: <https://doc.qt.io/qt-6.8/licensing.html>
 
@@ -13,7 +13,7 @@ Official corresponding source archives for the exact Qt version used by this bui
 - [qtbase 6.8.3 source archive](https://download.qt.io/archive/qt/6.8/6.8.3/submodules/qtbase-everywhere-src-6.8.3.tar.xz) — SHA-256 `56001b905601bb9023d399f3ba780d7fa940f3e4861e496a7c490331f49e0b80`
 - [qtsvg 6.8.3 source archive](https://download.qt.io/archive/qt/6.8/6.8.3/submodules/qtsvg-everywhere-src-6.8.3.tar.xz) — SHA-256 `35eb516460f00f264eb504baa253432384351cf23fb9980a5857190e8deef438`
 
-Qt's LGPL obligations include providing complete corresponding library source (or a valid written offer) and preserving users' ability to replace dynamically linked libraries. The Windows release will include the LGPL text, relevant notices, and corresponding Qt source archives once the SDK edition is verified.
+Qt's LGPL obligations include providing complete corresponding library source and preserving users' ability to replace dynamically linked libraries. The source archives are also available from the official Qt URLs above and their SHA-256 checksums are listed here.
 
 ## Lucide icons
 
@@ -21,6 +21,6 @@ The SVG interface icons are derived from Lucide Icons and Contributors; some fil
 
 ## MinGW runtime
 
-The Windows GUI contains GCC/MinGW runtime libraries (`libgcc_s_seh-1.dll`, `libstdc++-6.dll`, and `libwinpthread-1.dll`). The planned v1.1.0 package will include the toolchain's GCC Runtime Library Exception, GCC, and MinGW-w64 license notices in `THIRD_PARTY_NOTICES/`. GCC 13.1.0 source is available from <https://ftp.gnu.org/gnu/gcc/gcc-13.1.0/>; MinGW-w64 sources are available from <https://sourceforge.net/projects/mingw-w64/files/mingw-w64/>.
+The Windows GUI contains GCC/MinGW runtime libraries (`libgcc_s_seh-1.dll`, `libstdc++-6.dll`, and `libwinpthread-1.dll`). The toolchain's GCC Runtime Library Exception, GCC, and MinGW-w64 license notices are included in `THIRD_PARTY_NOTICES/`. GCC 13.1.0 source is available from <https://ftp.gnu.org/gnu/gcc/gcc-13.1.0/>; MinGW-w64 sources are available from <https://sourceforge.net/projects/mingw-w64/files/mingw-w64/>.
 
 Refer to each bundled component's own notice for its complete terms. The TeamSync Limited Use License does not replace or narrow third-party license rights.
