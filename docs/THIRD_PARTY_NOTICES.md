@@ -21,6 +21,6 @@ The SVG interface icons are derived from Lucide Icons and Contributors; some fil
 
 ## MinGW runtime
 
-The Windows GUI contains GCC/MinGW runtime libraries (`libgcc_s_seh-1.dll`, `libstdc++-6.dll`, and `libwinpthread-1.dll`). The release archive includes the toolchain's GCC Runtime Library Exception, GCC, and MinGW-w64 license notices in `THIRD_PARTY_NOTICES/`. GCC 13.1.0 source is available from <https://ftp.gnu.org/gnu/gcc/gcc-13.1.0/>; MinGW-w64 sources are available from <https://sourceforge.net/projects/mingw-w64/files/mingw-w64/>.
+The Windows GUI contains GCC/MinGW runtime libraries (`libgcc_s_seh-1.dll`, `libstdc++-6.dll`, and `libwinpthread-1.dll`). The planned v1.1.0 package will include the toolchain's GCC Runtime Library Exception, GCC, and MinGW-w64 license notices in `THIRD_PARTY_NOTICES/`. GCC 13.1.0 source is available from <https://ftp.gnu.org/gnu/gcc/gcc-13.1.0/>; MinGW-w64 sources are available from <https://sourceforge.net/projects/mingw-w64/files/mingw-w64/>.
 
 Refer to each bundled component's own notice for its complete terms. The TeamSync Limited Use License does not replace or narrow third-party license rights.
